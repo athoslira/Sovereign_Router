@@ -2,7 +2,6 @@ import { ItemView, MarkdownRenderer, Notice, TFile, TFolder, WorkspaceLeaf } fro
 import { buildDocumentContext, limitDocumentContent, type AttachedDocument } from '../document-context';
 import { isSupportedDocument, isTextDocument, needsDoclingConversion } from '../document-files';
 import { convertWithDocling, DoclingError } from '../docling';
-import type { McpClient } from '../mcp-client';
 import { loadMcpCatalog, parseMcpToolCalls, toExecutorTools, type McpCatalog } from '../mcp-tools';
 import { canCallMcpTool } from '../mcp-policy';
 import type { McpToolCall } from '../mcp-types';
@@ -11,15 +10,37 @@ import { modelLabel } from '../models';
 import { completeExecutor, OpenRouterError, routeWithGatekeeper, StreamingUnavailableError, streamExecutor } from '../openrouter';
 import { fallbackRoute, selectRoute } from '../routing';
 import { SkillResolver } from '../skills';
-import type { ChatMessage, OpenRouterToolCall, RouteResult, Usage } from '../types';
+import type { ChatMessage, OpenRouterToolCall, RouteResult, SkillReference, Usage, VaultContextReference } from '../types';
 import { confirmMcpToolCall } from './tool-confirmation-modal';
 import { VaultFolderPicker } from './vault-folder-picker';
 
 export const VIEW_TYPE_SOVEREIGN_ROUTER = 'sovereign-router-chat';
 
+interface SessionDisplayMessage {
+	role: 'user' | 'assistant';
+	content: string;
+	meta?: string;
+}
+
 interface AssistantElements {
-	bodyEl: HTMLElement;
-	metaEl: HTMLElement;
+	message: SessionDisplayMessage;
+	bodyEl: HTMLElement | null;
+	metaEl: HTMLElement | null;
+}
+
+interface ChatSession {
+	id: string;
+	title: string;
+	history: ChatMessage[];
+	messages: SessionDisplayMessage[];
+	documents: AttachedDocument[];
+	selectedModel: string;
+	model: string | null;
+	skill: SkillReference | null;
+	context: VaultContextReference | null;
+	useMcp: boolean;
+	abortController: AbortController | null;
+	isConvertingDocument: boolean;
 }
 
 function formatError(error: unknown): string {
@@ -43,10 +64,14 @@ function formatUsage(model: string, usage?: Usage, suffix?: string): string {
 }
 
 export class SovereignRouterView extends ItemView {
-	private readonly history: ChatMessage[] = [];
-	private readonly documents: AttachedDocument[] = [];
+	private readonly sessions = new Map<string, ChatSession>();
+	private readonly sessionOrder: string[] = [];
+	private activeSessionId = '';
+	private nextSessionNumber = 1;
 	private messagesEl!: HTMLElement;
 	private attachmentsEl!: HTMLElement;
+	private sessionListEl!: HTMLElement;
+	private sessionStatusEl!: HTMLElement;
 	private inputEl!: HTMLTextAreaElement;
 	private fileInput!: HTMLInputElement;
 	private modelSelect!: HTMLSelectElement;
@@ -55,9 +80,8 @@ export class SovereignRouterView extends ItemView {
 	private folderButton!: HTMLButtonElement;
 	private sendButton!: HTMLButtonElement;
 	private cancelButton!: HTMLButtonElement;
-	private abortController: AbortController | null = null;
-	private isConvertingDocument = false;
-	private mcpClients = new Map<string, McpClient>();
+	private newSessionButton!: HTMLButtonElement;
+	private endSessionButton!: HTMLButtonElement;
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: SovereignRouterPlugin) {
 		super(leaf);
@@ -90,6 +114,13 @@ export class SovereignRouterView extends ItemView {
 		mcpControl.createSpan({ text: 'MCP' });
 		controls.createSpan({ text: 'Session only', cls: 'sr-header-note' });
 
+		const sessionBar = this.containerEl.createDiv({ cls: 'sr-session-bar' });
+		this.sessionListEl = sessionBar.createDiv({ cls: 'sr-session-list' });
+		const sessionActions = sessionBar.createDiv({ cls: 'sr-session-actions' });
+		this.newSessionButton = sessionActions.createEl('button', { text: 'New session', cls: 'sr-session-button' });
+		this.endSessionButton = sessionActions.createEl('button', { text: 'End session', cls: 'sr-session-button' });
+		this.sessionStatusEl = this.containerEl.createDiv({ cls: 'sr-session-status' });
+
 		this.messagesEl = this.containerEl.createDiv({ cls: 'sr-messages' });
 		const composer = this.containerEl.createDiv({ cls: 'sr-composer' });
 		this.attachmentsEl = composer.createDiv({ cls: 'sr-attachments' });
@@ -110,7 +141,6 @@ export class SovereignRouterView extends ItemView {
 		this.folderButton = actions.createEl('button', { text: 'Attach vault folder', cls: 'sr-button sr-folder' });
 		this.cancelButton = actions.createEl('button', { text: 'Cancel', cls: 'sr-button sr-cancel' });
 		this.sendButton = actions.createEl('button', { text: 'Send', cls: 'sr-button sr-send' });
-		this.setBusy(false);
 
 		this.registerDomEvent(this.inputEl, 'keydown', (event: KeyboardEvent) => {
 			if (event.key === 'Enter' && !event.shiftKey) {
@@ -119,25 +149,120 @@ export class SovereignRouterView extends ItemView {
 			}
 		});
 		this.registerDomEvent(this.sendButton, 'click', () => void this.sendMessage());
-		this.registerDomEvent(this.cancelButton, 'click', () => this.abortController?.abort());
+		this.registerDomEvent(this.cancelButton, 'click', () => this.activeSession.abortController?.abort());
 		this.registerDomEvent(this.attachButton, 'click', () => this.fileInput.click());
 		this.registerDomEvent(this.folderButton, 'click', () => this.openFolderPicker());
 		this.registerDomEvent(this.fileInput, 'change', () => {
 			if (this.fileInput.files) void this.attachDocuments(this.fileInput.files);
 		});
-	}
+		this.registerDomEvent(this.modelSelect, 'change', () => {
+			const session = this.activeSession;
+			if (!session.model) session.selectedModel = this.modelSelect.value;
+		});
+		this.registerDomEvent(this.mcpToggle, 'change', () => {
+			const session = this.activeSession;
+			session.useMcp = this.mcpToggle.checked;
+		});
+		this.registerDomEvent(this.newSessionButton, 'click', () => this.createSession());
+		this.registerDomEvent(this.endSessionButton, 'click', () => void this.endActiveSession());
 
-	private openFolderPicker(): void {
-		if (this.isConvertingDocument || this.abortController) return;
-		new VaultFolderPicker(this.app, (folder) => void this.attachVaultFolder(folder)).open();
+		this.createSession();
 	}
 
 	async onClose(): Promise<void> {
-		this.abortController?.abort();
-		await this.closeMcpClients();
+		for (const session of this.sessions.values()) session.abortController?.abort();
+		this.sessions.clear();
+		this.sessionOrder.length = 0;
+	}
+
+	private get activeSession(): ChatSession {
+		const session = this.sessions.get(this.activeSessionId);
+		if (!session) throw new Error('No active chat session is available.');
+		return session;
+	}
+
+	private createSession(): void {
+		const number = this.nextSessionNumber++;
+		const id = `session-${Date.now()}-${number}`;
+		const session: ChatSession = {
+			id,
+			title: `Session ${number}`,
+			history: [],
+			messages: [],
+			documents: [],
+			selectedModel: '',
+			model: null,
+			skill: null,
+			context: null,
+			useMcp: false,
+			abortController: null,
+			isConvertingDocument: false,
+		};
+		this.sessions.set(id, session);
+		this.sessionOrder.push(id);
+		void this.activateSession(id);
+	}
+
+	private async activateSession(id: string): Promise<void> {
+		if (!this.sessions.has(id)) return;
+		this.activeSessionId = id;
+		const session = this.activeSession;
+		this.fileInput.value = '';
+		this.modelSelect.value = session.selectedModel;
+		this.mcpToggle.checked = session.useMcp;
+		this.renderSessionTabs();
+		this.renderAttachments();
+		this.setBusy();
+		await this.renderMessages(session);
+	}
+
+	private async endActiveSession(): Promise<void> {
+		const session = this.activeSession;
+		if (session.abortController || session.isConvertingDocument) return;
+		const index = this.sessionOrder.indexOf(session.id);
+		this.sessions.delete(session.id);
+		this.sessionOrder.splice(index, 1);
+		const nextSessionId = this.sessionOrder[index] ?? this.sessionOrder[index - 1];
+		if (nextSessionId) await this.activateSession(nextSessionId);
+		else this.createSession();
+	}
+
+	private renderSessionTabs(): void {
+		this.sessionListEl.empty();
+		for (const id of this.sessionOrder) {
+			const session = this.sessions.get(id);
+			if (!session) continue;
+			const state = session.model ? modelLabel(session.model) : 'choose model';
+			const button = this.sessionListEl.createEl('button', {
+				text: `${session.title} · ${state}`,
+				cls: 'sr-session-tab',
+			});
+			if (session.id === this.activeSessionId) button.addClass('is-active');
+			this.registerDomEvent(button, 'click', () => void this.activateSession(session.id));
+		}
+		const session = this.activeSession;
+		this.sessionStatusEl.setText(session.model
+			? `Active session · ${modelLabel(session.model)} is locked for this task.`
+			: 'New session · choose a model or use automatic routing for the first message.');
+	}
+
+	private isActive(session: ChatSession): boolean {
+		return session.id === this.activeSessionId;
+	}
+
+	private canInteract(session: ChatSession): boolean {
+		return !session.abortController && !session.isConvertingDocument;
+	}
+
+	private openFolderPicker(): void {
+		const session = this.activeSession;
+		if (!this.canInteract(session)) return;
+		new VaultFolderPicker(this.app, (folder) => void this.attachVaultFolder(folder, session)).open();
 	}
 
 	private async attachDocuments(files: FileList): Promise<void> {
+		const session = this.activeSession;
+		if (!this.canInteract(session)) return;
 		if (!this.plugin.settings.doclingServiceUrl) {
 			new Notice('Configure a Docling service URL before attaching documents.');
 			this.fileInput.value = '';
@@ -151,15 +276,14 @@ export class SovereignRouterView extends ItemView {
 			return;
 		}
 
-		this.isConvertingDocument = true;
-		this.attachButton.setText('Converting...');
-		this.setBusy(Boolean(this.abortController));
+		session.isConvertingDocument = true;
+		this.refreshSessionUi(session, 'Converting...');
 		try {
 			for (const file of Array.from(files)) {
 				try {
 					const markdown = await convertWithDocling(file, this.plugin.settings.doclingServiceUrl, apiKey);
 					const limited = limitDocumentContent(markdown);
-					this.documents.push({ name: file.name, markdown: limited.content, truncated: limited.truncated });
+					session.documents.push({ name: file.name, markdown: limited.content, truncated: limited.truncated });
 					try {
 						await this.plugin.contextIndex.addExternalDocument(file.name, limited.content);
 					} catch (_error) {
@@ -171,16 +295,18 @@ export class SovereignRouterView extends ItemView {
 					new Notice(message);
 				}
 			}
-			this.renderAttachments();
+			if (this.isActive(session)) this.renderAttachments();
 		} finally {
-			this.isConvertingDocument = false;
-			this.attachButton.setText('Attach document');
-			this.fileInput.value = '';
-			this.setBusy(Boolean(this.abortController));
+			session.isConvertingDocument = false;
+			if (this.isActive(session)) {
+				this.fileInput.value = '';
+				this.refreshSessionUi(session);
+			}
 		}
 	}
 
-	private async attachVaultFolder(folder: TFolder): Promise<void> {
+	private async attachVaultFolder(folder: TFolder, session: ChatSession): Promise<void> {
+		if (!this.canInteract(session)) return;
 		const prefix = folder.path ? `${folder.path}/` : '';
 		const candidates = this.app.vault
 			.getFiles()
@@ -191,7 +317,7 @@ export class SovereignRouterView extends ItemView {
 		}
 
 		const maximumFiles = 25;
-		const availableSlots = Math.max(0, maximumFiles - this.documents.length);
+		const availableSlots = Math.max(0, maximumFiles - session.documents.length);
 		if (availableSlots === 0) {
 			new Notice(`You can attach up to ${maximumFiles} documents to a chat session.`);
 			return;
@@ -201,10 +327,8 @@ export class SovereignRouterView extends ItemView {
 		const doclingKey = secretName ? this.app.secretStorage.getSecret(secretName) : null;
 		const canUseDocling = Boolean(this.plugin.settings.doclingServiceUrl) && (!secretName || Boolean(doclingKey));
 
-		this.isConvertingDocument = true;
-		this.attachButton.setText('Reading...');
-		this.folderButton.setText('Reading...');
-		this.setBusy(false);
+		session.isConvertingDocument = true;
+		this.refreshSessionUi(session, 'Reading...');
 		let attached = 0;
 		let skipped = candidates.length - files.length;
 		try {
@@ -215,13 +339,13 @@ export class SovereignRouterView extends ItemView {
 						skipped += 1;
 						continue;
 					}
-					this.documents.push(document);
+					session.documents.push(document);
 					attached += 1;
 				} catch (_error) {
 					skipped += 1;
 				}
 			}
-			this.renderAttachments();
+			if (this.isActive(session)) this.renderAttachments();
 			const summary = [`${attached} file${attached === 1 ? '' : 's'} attached from ${folder.path || 'vault root'}.`];
 			if (skipped) summary.push(`${skipped} skipped.`);
 			if (!canUseDocling && files.some((file) => needsDoclingConversion(file.name))) {
@@ -229,10 +353,8 @@ export class SovereignRouterView extends ItemView {
 			}
 			new Notice(summary.join(' '));
 		} finally {
-			this.isConvertingDocument = false;
-			this.attachButton.setText('Attach document');
-			this.folderButton.setText('Attach vault folder');
-			this.setBusy(false);
+			session.isConvertingDocument = false;
+			this.refreshSessionUi(session);
 		}
 	}
 
@@ -261,12 +383,9 @@ export class SovereignRouterView extends ItemView {
 	}
 
 	private async sendMessage(): Promise<void> {
+		const session = this.activeSession;
 		const question = this.inputEl.value.trim();
-		if (!question || this.abortController) return;
-		if (this.isConvertingDocument) {
-			new Notice('Wait for document conversion to finish before sending a message.');
-			return;
-		}
+		if (!question || !this.canInteract(session)) return;
 		const secretName = this.plugin.settings.openRouterSecretName;
 		const apiKey = secretName ? this.app.secretStorage.getSecret(secretName) : null;
 		if (!apiKey) {
@@ -275,83 +394,109 @@ export class SovereignRouterView extends ItemView {
 		}
 
 		this.inputEl.value = '';
-		this.appendUser(question);
-		this.history.push({ role: 'user', content: question });
-		const assistant = this.appendAssistant();
-		this.abortController = new AbortController();
-		this.setBusy(true);
+		this.appendUser(session, question);
+		session.history.push({ role: 'user', content: question });
+		if (session.messages.length === 1) session.title = this.titleFor(question);
+		const assistant = this.appendAssistant(session);
+		session.abortController = new AbortController();
+		this.refreshSessionUi(session);
 		let assistantText = '';
+		let catalog: McpCatalog | null = null;
 		try {
-			let route: RouteResult;
-			try {
-				route = selectRoute(await routeWithGatekeeper(question, this.plugin.settings, apiKey), this.plugin.settings);
-			} catch (_error) {
-				route = fallbackRoute(this.plugin.settings, 'Gatekeeper unavailable; using the default model.');
-			}
-			const manualModel = this.modelSelect.value;
-			if (manualModel) {
-				route = { ...route, model: manualModel, note: `Manual model: ${modelLabel(manualModel)}.` };
-			}
-			assistant.metaEl.setText(route.note || `Routing to ${modelLabel(route.model)}...`);
+			const route = await this.routeForSession(session, question, apiKey);
+			this.setAssistantMeta(session, assistant, route.note || `Using ${modelLabel(route.model)} for this session.`);
 			const skill = await new SkillResolver(this.app, this.plugin.settings).resolve(route.skill);
-			if (skill.note) assistant.metaEl.setText(`${route.note ? `${route.note} ` : ''}${skill.note}`);
-			const attachedContext = buildDocumentContext(this.documents);
+			if (skill.note) this.setAssistantMeta(session, assistant, `${route.note ? `${route.note} ` : ''}${skill.note}`);
+			const attachedContext = buildDocumentContext(session.documents);
 			let vaultContext: string | null = null;
 			if (route.context) {
 				try {
 					const resolved = await this.plugin.contextIndex.resolve(route.context.query);
 					vaultContext = resolved.content;
-					if (resolved.note) assistant.metaEl.setText(resolved.note);
+					if (resolved.note) this.setAssistantMeta(session, assistant, resolved.note);
 				} catch (_error) {
-					assistant.metaEl.setText('Local context is unavailable; continuing without it.');
+					this.setAssistantMeta(session, assistant, 'Local context is unavailable; continuing without it.');
 				}
 			}
 			const documentContext = [attachedContext, vaultContext].filter((value): value is string => Boolean(value)).join('\n\n---\n\n') || null;
-			const catalog = this.mcpToggle.checked ? await this.loadMcpCatalog() : null;
+			catalog = session.useMcp ? await this.loadMcpCatalog() : null;
 			const executorTools = catalog ? toExecutorTools(catalog.tools) : [];
 			if (catalog?.warnings.length) new Notice(catalog.warnings.join(' '));
-			if (this.mcpToggle.checked && executorTools.length === 0) assistant.metaEl.setText('No MCP tools available; answering without them.');
+			if (session.useMcp && executorTools.length === 0) this.setAssistantMeta(session, assistant, 'No MCP tools available; answering without them.');
 			const callbacks = {
 				onDelta: (text: string) => {
 					assistantText += text;
-					assistant.bodyEl.setText(assistantText);
-					this.scrollToBottom();
+					this.setAssistantContent(session, assistant, assistantText);
+					if (this.isActive(session)) this.scrollToBottom();
 				},
-				onUsage: (usage: Usage) => assistant.metaEl.setText(formatUsage(route.model, usage)),
-				onModel: (model: string) => assistant.metaEl.setText(formatUsage(model)),
+				onUsage: (usage: Usage) => this.setAssistantMeta(session, assistant, formatUsage(route.model, usage)),
+				onModel: (model: string) => this.setAssistantMeta(session, assistant, formatUsage(model)),
 			};
-			await this.runExecutorWithMcp(route.model, skill.content, documentContext, apiKey, callbacks, assistant, catalog, executorTools, (text) => { assistantText = text; }, () => assistantText, () => { assistantText = ''; });
-			await this.renderMarkdown(assistant.bodyEl, assistantText);
+			await this.runExecutorWithMcp(session, route.model, skill.content, documentContext, apiKey, callbacks, assistant, catalog, executorTools, (text) => {
+				assistantText = text;
+				this.setAssistantContent(session, assistant, text);
+			}, () => assistantText, () => {
+				assistantText = '';
+				this.setAssistantContent(session, assistant, '');
+			});
+			if (this.isActive(session) && assistant.bodyEl?.isConnected) await this.renderMarkdown(assistant.bodyEl, assistantText);
 		} catch (error) {
 			const message = formatError(error);
-			assistant.metaEl.setText('Request error');
+			this.setAssistantMeta(session, assistant, 'Request error');
 			if (assistantText) {
-				assistant.bodyEl.setText(`${assistantText}\n\n_${message}_`);
-				this.history.push({ role: 'assistant', content: assistantText });
+				assistantText = `${assistantText}\n\n_${message}_`;
+				this.setAssistantContent(session, assistant, assistantText);
+				session.history.push({ role: 'assistant', content: assistantText });
 			} else {
-				assistant.bodyEl.setText(message);
+				this.setAssistantContent(session, assistant, message);
 			}
 		} finally {
-			this.abortController = null;
-			this.setBusy(false);
-			this.scrollToBottom();
+			await this.closeMcpClients(catalog);
+			session.abortController = null;
+			this.refreshSessionUi(session);
+			if (this.isActive(session)) this.scrollToBottom();
 		}
 	}
 
-	private async loadMcpCatalog(): Promise<McpCatalog> {
-		await this.closeMcpClients();
-		const catalog = await loadMcpCatalog(this.plugin.settings.mcpServers, (secretName) => this.app.secretStorage.getSecret(secretName));
-		this.mcpClients = catalog.clients;
-		return catalog;
+	private async routeForSession(session: ChatSession, question: string, apiKey: string): Promise<RouteResult> {
+		if (session.model) {
+			return {
+				model: session.model,
+				skill: session.skill,
+				context: session.context,
+				note: `Using the session model: ${modelLabel(session.model)}.`,
+			};
+		}
+
+		let route: RouteResult;
+		if (session.selectedModel) {
+			route = { model: session.selectedModel, skill: null, context: null, note: `Manual model: ${modelLabel(session.selectedModel)}.` };
+		} else {
+			try {
+				route = selectRoute(await routeWithGatekeeper(question, this.plugin.settings, apiKey), this.plugin.settings);
+			} catch (_error) {
+				route = fallbackRoute(this.plugin.settings, 'Gatekeeper unavailable; using the default model for this session.');
+			}
+		}
+		session.model = route.model;
+		session.skill = route.skill;
+		session.context = route.context;
+		this.refreshSessionUi(session);
+		return route;
 	}
 
-	private async closeMcpClients(): Promise<void> {
-		const clients = [...this.mcpClients.values()];
-		this.mcpClients.clear();
+	private async loadMcpCatalog(): Promise<McpCatalog> {
+		return loadMcpCatalog(this.plugin.settings.mcpServers, (secretName) => this.app.secretStorage.getSecret(secretName));
+	}
+
+	private async closeMcpClients(catalog: McpCatalog | null): Promise<void> {
+		if (!catalog) return;
+		const clients = [...catalog.clients.values()];
 		await Promise.all(clients.map((client) => client.close()));
 	}
 
 	private async runExecutorWithMcp(
+		session: ChatSession,
 		model: string,
 		skillContent: string | null,
 		documentContext: string | null,
@@ -367,44 +512,46 @@ export class SovereignRouterView extends ItemView {
 		for (let round = 0; round < 3; round += 1) {
 			let toolCalls: OpenRouterToolCall[];
 			try {
-				toolCalls = await streamExecutor(model, this.history, skillContent, documentContext, apiKey, callbacks, this.abortController?.signal as AbortSignal, executorTools);
+				const signal = session.abortController?.signal;
+				if (!signal) throw new Error('The session request is no longer active.');
+				toolCalls = await streamExecutor(model, session.history, skillContent, documentContext, apiKey, callbacks, signal, executorTools);
 			} catch (error) {
 				if (!(error instanceof StreamingUnavailableError) || getText()) throw error;
-				const fallback = await completeExecutor(model, this.history, skillContent, documentContext, apiKey, executorTools);
+				const fallback = await completeExecutor(model, session.history, skillContent, documentContext, apiKey, executorTools);
 				setText(fallback.content);
 				toolCalls = fallback.toolCalls;
-				assistant.metaEl.setText(formatUsage(fallback.model, fallback.usage, 'non-streaming fallback'));
+				this.setAssistantMeta(session, assistant, formatUsage(fallback.model, fallback.usage, 'non-streaming fallback'));
 			}
 			if (toolCalls.length === 0) {
-				this.history.push({ role: 'assistant', content: getText() });
+				session.history.push({ role: 'assistant', content: getText() });
 				return;
 			}
 			if (!catalog) throw new Error('The model requested MCP tools while MCP is disabled.');
-			this.history.push({ role: 'assistant', content: getText() || null, tool_calls: toolCalls });
-			assistant.metaEl.setText('Using connected MCP tools...');
-			await this.executeMcpToolCalls(toolCalls, catalog);
+			session.history.push({ role: 'assistant', content: getText() || null, tool_calls: toolCalls });
+			this.setAssistantMeta(session, assistant, 'Using connected MCP tools...');
+			await this.executeMcpToolCalls(session, toolCalls, catalog);
 			if (round === 2) {
 				setText('The MCP tool-call limit was reached. Please narrow the request and try again.');
-				this.history.push({ role: 'assistant', content: getText() });
+				session.history.push({ role: 'assistant', content: getText() });
 				return;
 			}
 			clearText();
-			assistant.bodyEl.empty();
+			if (this.isActive(session) && assistant.bodyEl?.isConnected) assistant.bodyEl.empty();
 		}
 	}
 
-	private async executeMcpToolCalls(toolCalls: OpenRouterToolCall[], catalog: McpCatalog): Promise<void> {
+	private async executeMcpToolCalls(session: ChatSession, toolCalls: OpenRouterToolCall[], catalog: McpCatalog): Promise<void> {
 		const parsed = parseMcpToolCalls(toolCalls, catalog.tools);
 		for (const call of parsed) {
 			if ('error' in call) {
-				this.history.push({ role: 'tool', content: call.error, tool_call_id: call.id });
+				session.history.push({ role: 'tool', content: call.error, tool_call_id: call.id });
 				continue;
 			}
-			this.history.push({ role: 'tool', content: await this.executeMcpToolCall(call, catalog), tool_call_id: call.callId });
+			session.history.push({ role: 'tool', content: await this.executeMcpToolCall(session, call, catalog), tool_call_id: call.callId });
 		}
 	}
 
-	private async executeMcpToolCall(call: McpToolCall, catalog: McpCatalog): Promise<string> {
+	private async executeMcpToolCall(session: ChatSession, call: McpToolCall, catalog: McpCatalog): Promise<string> {
 		const server = this.plugin.settings.mcpServers.find((item) => item.id === call.tool.serverId);
 		if (!server) return 'The requested MCP connection no longer exists.';
 		const policy = canCallMcpTool(call.tool, server);
@@ -413,36 +560,71 @@ export class SovereignRouterView extends ItemView {
 		const client = catalog.clients.get(server.id);
 		if (!client) return 'The MCP connection is unavailable.';
 		try {
-			return await client.callTool(call.tool.name, call.arguments, this.abortController?.signal);
+			return await client.callTool(call.tool.name, call.arguments, session.abortController?.signal);
 		} catch (error) {
 			return error instanceof Error ? `MCP tool error: ${error.message}` : 'MCP tool failed.';
 		}
 	}
 
 	private renderAttachments(): void {
+		const session = this.activeSession;
 		this.attachmentsEl.empty();
-		for (const [index, document] of this.documents.entries()) {
+		for (const [index, document] of session.documents.entries()) {
 			const chip = this.attachmentsEl.createDiv({ cls: 'sr-attachment' });
 			chip.createSpan({ text: document.truncated ? `${document.name} (truncated)` : document.name });
 			const remove = chip.createEl('button', { text: 'Remove', cls: 'sr-attachment-remove' });
+			remove.disabled = !this.canInteract(session);
 			this.registerDomEvent(remove, 'click', () => {
-				this.documents.splice(index, 1);
+				if (!this.canInteract(session)) return;
+				session.documents.splice(index, 1);
 				this.renderAttachments();
 			});
 		}
 	}
 
-	private appendUser(content: string): void {
-		const message = this.messagesEl.createDiv({ cls: 'sr-message sr-user' });
-		message.createDiv({ text: content, cls: 'sr-message-body' });
-		this.scrollToBottom();
+	private async renderMessages(session: ChatSession): Promise<void> {
+		if (!this.isActive(session)) return;
+		this.messagesEl.empty();
+		for (const message of session.messages) {
+			if (!this.isActive(session)) return;
+			const elements = this.createMessageElement(message);
+			if (message.role === 'assistant' && message.content) await this.renderMarkdown(elements.bodyEl, message.content);
+		}
+		if (this.isActive(session)) this.scrollToBottom();
 	}
 
-	private appendAssistant(): AssistantElements {
-		const messageEl = this.messagesEl.createDiv({ cls: 'sr-message sr-assistant' });
-		const metaEl = messageEl.createDiv({ text: 'Preparing request...', cls: 'sr-message-meta' });
-		const bodyEl = messageEl.createDiv({ cls: 'sr-message-body' });
-		return { metaEl, bodyEl };
+	private appendUser(session: ChatSession, content: string): void {
+		const message: SessionDisplayMessage = { role: 'user', content };
+		session.messages.push(message);
+		if (this.isActive(session)) {
+			this.createMessageElement(message);
+			this.scrollToBottom();
+		}
+	}
+
+	private appendAssistant(session: ChatSession): AssistantElements {
+		const message: SessionDisplayMessage = { role: 'assistant', content: '', meta: 'Preparing request...' };
+		session.messages.push(message);
+		if (!this.isActive(session)) return { message, bodyEl: null, metaEl: null };
+		const elements = this.createMessageElement(message);
+		return { message, bodyEl: elements.bodyEl, metaEl: elements.metaEl };
+	}
+
+	private createMessageElement(message: SessionDisplayMessage): { bodyEl: HTMLElement; metaEl: HTMLElement | null } {
+		const messageEl = this.messagesEl.createDiv({ cls: `sr-message sr-${message.role}` });
+		if (message.role === 'user') return { bodyEl: messageEl.createDiv({ text: message.content, cls: 'sr-message-body' }), metaEl: null };
+		const metaEl = messageEl.createDiv({ text: message.meta || '', cls: 'sr-message-meta' });
+		return { bodyEl: messageEl.createDiv({ text: message.content, cls: 'sr-message-body' }), metaEl };
+	}
+
+	private setAssistantContent(session: ChatSession, assistant: AssistantElements, content: string): void {
+		assistant.message.content = content;
+		if (this.isActive(session) && assistant.bodyEl?.isConnected) assistant.bodyEl.setText(content);
+	}
+
+	private setAssistantMeta(session: ChatSession, assistant: AssistantElements, meta: string): void {
+		assistant.message.meta = meta;
+		if (this.isActive(session) && assistant.metaEl?.isConnected) assistant.metaEl.setText(meta);
 	}
 
 	private async renderMarkdown(element: HTMLElement, content: string): Promise<void> {
@@ -450,15 +632,30 @@ export class SovereignRouterView extends ItemView {
 		await MarkdownRenderer.renderMarkdown(content, element, '', this);
 	}
 
-	private setBusy(isRequestBusy: boolean): void {
-		const controlsDisabled = isRequestBusy || this.isConvertingDocument;
+	private refreshSessionUi(session: ChatSession, actionLabel?: string): void {
+		if (!this.isActive(session)) return;
+		this.attachButton.setText(actionLabel || 'Attach document');
+		this.folderButton.setText(actionLabel || 'Attach vault folder');
+		this.renderSessionTabs();
+		this.setBusy();
+	}
+
+	private setBusy(): void {
+		const session = this.activeSession;
+		const controlsDisabled = !this.canInteract(session);
 		this.sendButton.disabled = controlsDisabled;
 		this.attachButton.disabled = controlsDisabled;
 		this.folderButton.disabled = controlsDisabled;
-		this.cancelButton.disabled = !isRequestBusy;
+		this.cancelButton.disabled = !session.abortController;
 		this.inputEl.disabled = controlsDisabled;
-		this.modelSelect.disabled = controlsDisabled;
+		this.modelSelect.disabled = controlsDisabled || Boolean(session.model);
 		this.mcpToggle.disabled = controlsDisabled;
+		this.endSessionButton.disabled = Boolean(session.abortController) || session.isConvertingDocument;
+	}
+
+	private titleFor(question: string): string {
+		const compact = question.replace(/\s+/g, ' ').trim();
+		return compact.length > 28 ? `${compact.slice(0, 28)}…` : compact || 'Session';
 	}
 
 	private scrollToBottom(): void {
