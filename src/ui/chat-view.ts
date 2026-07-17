@@ -2,6 +2,7 @@ import { ItemView, MarkdownRenderer, Notice, TFile, TFolder, WorkspaceLeaf } fro
 import { buildDocumentContext, limitDocumentContent, type AttachedDocument } from '../document-context';
 import { isSupportedDocument, isTextDocument, needsDoclingConversion } from '../document-files';
 import { convertWithDocling, DoclingError } from '../docling';
+import { HermesClient, HermesError } from '../hermes';
 import { loadMcpCatalog, parseMcpToolCalls, toExecutorTools, type McpCatalog } from '../mcp-tools';
 import { canCallMcpTool } from '../mcp-policy';
 import type { McpToolCall } from '../mcp-types';
@@ -10,7 +11,7 @@ import { modelLabel } from '../models';
 import { completeExecutor, OpenRouterError, routeWithGatekeeper, StreamingUnavailableError, streamExecutor } from '../openrouter';
 import { fallbackRoute, selectRoute } from '../routing';
 import { SkillResolver } from '../skills';
-import type { ChatMessage, OpenRouterToolCall, RouteResult, SkillReference, Usage, VaultContextReference } from '../types';
+import type { ChatMessage, OpenRouterToolCall, RouteResult, SessionRuntime, SkillReference, Usage, VaultContextReference } from '../types';
 import { confirmMcpToolCall } from './tool-confirmation-modal';
 import { VaultFolderPicker } from './vault-folder-picker';
 
@@ -30,16 +31,20 @@ interface AssistantElements {
 
 interface ChatSession {
 	id: string;
-	title: string;
+	number: number;
 	history: ChatMessage[];
 	messages: SessionDisplayMessage[];
 	documents: AttachedDocument[];
 	selectedModel: string;
+	runtime: SessionRuntime;
+	resolvedRuntime: Exclude<SessionRuntime, 'auto'> | null;
 	model: string | null;
 	skill: SkillReference | null;
 	context: VaultContextReference | null;
 	useMcp: boolean;
 	abortController: AbortController | null;
+	hermesClient: HermesClient | null;
+	hermesRunId: string | null;
 	isConvertingDocument: boolean;
 }
 
@@ -49,6 +54,12 @@ function formatError(error: unknown): string {
 		if (error.status === 402) return 'Your OpenRouter account has insufficient credits.';
 		if (error.status === 429) return 'OpenRouter is rate-limiting this request. Please try again shortly.';
 		if (error.status && error.status >= 500) return 'OpenRouter or the selected provider is temporarily unavailable.';
+		return error.message;
+	}
+	if (error instanceof HermesError) {
+		if (error.status === 401 || error.status === 403) return 'The Hermes API key is invalid or unavailable.';
+		if (error.status === 429) return 'Hermes is rate-limiting this request. Please try again shortly.';
+		if (error.status && error.status >= 500) return 'Hermes is temporarily unavailable. Check the Hermes service and try again.';
 		return error.message;
 	}
 	if (error instanceof DOMException && error.name === 'AbortError') return 'Response cancelled.';
@@ -75,6 +86,7 @@ export class SovereignRouterView extends ItemView {
 	private inputEl!: HTMLTextAreaElement;
 	private fileInput!: HTMLInputElement;
 	private modelSelect!: HTMLSelectElement;
+	private runtimeSelect!: HTMLSelectElement;
 	private mcpToggle!: HTMLInputElement;
 	private attachButton!: HTMLButtonElement;
 	private folderButton!: HTMLButtonElement;
@@ -101,12 +113,16 @@ export class SovereignRouterView extends ItemView {
 		const header = this.containerEl.createDiv({ cls: 'sr-header' });
 		header.createEl('h4', { text: 'Sovereign Router' });
 		const controls = header.createDiv({ cls: 'sr-header-controls' });
+		this.runtimeSelect = controls.createEl('select', { cls: 'sr-model-select', attr: { 'aria-label': 'Execution runtime' } });
+		this.runtimeSelect.createEl('option', { text: 'Auto runtime', value: 'auto' });
+		this.runtimeSelect.createEl('option', { text: 'Sovereign chat', value: 'chat' });
+		this.runtimeSelect.createEl('option', { text: 'Hermes Agent', value: 'hermes' });
 		this.modelSelect = controls.createEl('select', {
 			cls: 'sr-model-select',
 			attr: { 'aria-label': 'Executor model' },
 		});
 		this.modelSelect.createEl('option', { text: 'Auto route', value: '' });
-		for (const model of this.plugin.settings.permittedExecutorModels) {
+		for (const model of this.plugin.manualModelOptions()) {
 			this.modelSelect.createEl('option', { text: modelLabel(model), value: model });
 		}
 		const mcpControl = controls.createEl('label', { cls: 'sr-mcp-toggle' });
@@ -149,7 +165,7 @@ export class SovereignRouterView extends ItemView {
 			}
 		});
 		this.registerDomEvent(this.sendButton, 'click', () => void this.sendMessage());
-		this.registerDomEvent(this.cancelButton, 'click', () => this.activeSession.abortController?.abort());
+		this.registerDomEvent(this.cancelButton, 'click', () => void this.cancelActiveRequest());
 		this.registerDomEvent(this.attachButton, 'click', () => this.fileInput.click());
 		this.registerDomEvent(this.folderButton, 'click', () => this.openFolderPicker());
 		this.registerDomEvent(this.fileInput, 'change', () => {
@@ -158,6 +174,11 @@ export class SovereignRouterView extends ItemView {
 		this.registerDomEvent(this.modelSelect, 'change', () => {
 			const session = this.activeSession;
 			if (!session.model) session.selectedModel = this.modelSelect.value;
+		});
+		this.registerDomEvent(this.runtimeSelect, 'change', () => {
+			const session = this.activeSession;
+			if (!session.resolvedRuntime) session.runtime = this.runtimeSelect.value as SessionRuntime;
+			this.refreshSessionUi(session);
 		});
 		this.registerDomEvent(this.mcpToggle, 'change', () => {
 			const session = this.activeSession;
@@ -170,7 +191,7 @@ export class SovereignRouterView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
-		for (const session of this.sessions.values()) session.abortController?.abort();
+		for (const session of this.sessions.values()) void this.cancelRequest(session);
 		this.sessions.clear();
 		this.sessionOrder.length = 0;
 	}
@@ -186,16 +207,20 @@ export class SovereignRouterView extends ItemView {
 		const id = `session-${Date.now()}-${number}`;
 		const session: ChatSession = {
 			id,
-			title: `Session ${number}`,
+			number,
 			history: [],
 			messages: [],
 			documents: [],
 			selectedModel: '',
+			runtime: 'auto',
+			resolvedRuntime: null,
 			model: null,
 			skill: null,
 			context: null,
 			useMcp: false,
 			abortController: null,
+			hermesClient: null,
+			hermesRunId: null,
 			isConvertingDocument: false,
 		};
 		this.sessions.set(id, session);
@@ -209,6 +234,7 @@ export class SovereignRouterView extends ItemView {
 		const session = this.activeSession;
 		this.fileInput.value = '';
 		this.modelSelect.value = session.selectedModel;
+		this.runtimeSelect.value = session.runtime;
 		this.mcpToggle.checked = session.useMcp;
 		this.renderSessionTabs();
 		this.renderAttachments();
@@ -232,15 +258,20 @@ export class SovereignRouterView extends ItemView {
 		for (const id of this.sessionOrder) {
 			const session = this.sessions.get(id);
 			if (!session) continue;
-			const state = session.model ? modelLabel(session.model) : 'choose model';
+			const model = session.model ?? session.selectedModel;
+			const state = session.resolvedRuntime === 'hermes' || session.runtime === 'hermes' ? 'Hermes Agent' : model ? modelLabel(model) : 'Auto route';
 			const button = this.sessionListEl.createEl('button', {
-				text: `${session.title} · ${state}`,
+				text: `Session ${session.number} · ${state}`,
 				cls: 'sr-session-tab',
 			});
 			if (session.id === this.activeSessionId) button.addClass('is-active');
 			this.registerDomEvent(button, 'click', () => void this.activateSession(session.id));
 		}
 		const session = this.activeSession;
+		if (session.resolvedRuntime === 'hermes') {
+			this.sessionStatusEl.setText('Active session · Hermes Agent is handling this task outside Obsidian.');
+			return;
+		}
 		this.sessionStatusEl.setText(session.model
 			? `Active session · ${modelLabel(session.model)} is locked for this task.`
 			: 'New session · choose a model or use automatic routing for the first message.');
@@ -386,9 +417,13 @@ export class SovereignRouterView extends ItemView {
 		const session = this.activeSession;
 		const question = this.inputEl.value.trim();
 		if (!question || !this.canInteract(session)) return;
+		if ((session.runtime === 'hermes' || session.resolvedRuntime === 'hermes') && !this.hasHermesCredentials()) {
+			new Notice('Configure the Hermes API URL and API key in Sovereign Router settings first.');
+			return;
+		}
 		const secretName = this.plugin.settings.openRouterSecretName;
 		const apiKey = secretName ? this.app.secretStorage.getSecret(secretName) : null;
-		if (!apiKey) {
+		if (!apiKey && session.runtime !== 'hermes' && session.resolvedRuntime !== 'hermes') {
 			new Notice('Select an OpenRouter API key in Sovereign Router settings first.');
 			return;
 		}
@@ -396,14 +431,28 @@ export class SovereignRouterView extends ItemView {
 		this.inputEl.value = '';
 		this.appendUser(session, question);
 		session.history.push({ role: 'user', content: question });
-		if (session.messages.length === 1) session.title = this.titleFor(question);
 		const assistant = this.appendAssistant(session);
 		session.abortController = new AbortController();
 		this.refreshSessionUi(session);
 		let assistantText = '';
 		let catalog: McpCatalog | null = null;
 		try {
+			if (session.runtime === 'hermes' || session.resolvedRuntime === 'hermes') {
+				await this.runHermesSession(session, question, assistant, null, (text) => {
+					assistantText += text;
+					this.setAssistantContent(session, assistant, assistantText);
+				});
+				return;
+			}
+			if (!apiKey) throw new OpenRouterError('OpenRouter API key is unavailable.');
 			const route = await this.routeForSession(session, question, apiKey);
+			if (route.runtime === 'hermes') {
+				await this.runHermesSession(session, question, assistant, route, (text) => {
+					assistantText += text;
+					this.setAssistantContent(session, assistant, assistantText);
+				});
+				return;
+			}
 			this.setAssistantMeta(session, assistant, route.note || `Using ${modelLabel(route.model)} for this session.`);
 			const skill = await new SkillResolver(this.app, this.plugin.settings).resolve(route.skill);
 			if (skill.note) this.setAssistantMeta(session, assistant, `${route.note ? `${route.note} ` : ''}${skill.note}`);
@@ -453,24 +502,81 @@ export class SovereignRouterView extends ItemView {
 		} finally {
 			await this.closeMcpClients(catalog);
 			session.abortController = null;
+			session.hermesRunId = null;
+			session.hermesClient = null;
 			this.refreshSessionUi(session);
 			if (this.isActive(session)) this.scrollToBottom();
 		}
 	}
 
+	private hasHermesCredentials(): boolean {
+		const secretName = this.plugin.settings.hermesSecretName;
+		return Boolean(this.plugin.settings.hermesServiceUrl && secretName && this.app.secretStorage.getSecret(secretName));
+	}
+
+	private async runHermesSession(
+		session: ChatSession,
+		question: string,
+		assistant: AssistantElements,
+		route: RouteResult | null,
+		onDelta: (text: string) => void,
+	): Promise<void> {
+		const secretName = this.plugin.settings.hermesSecretName;
+		const apiKey = secretName ? this.app.secretStorage.getSecret(secretName) : null;
+		if (!apiKey || !this.plugin.settings.hermesServiceUrl) throw new HermesError('Configure the Hermes API URL and API key in Sovereign Router settings first.');
+		const signal = session.abortController?.signal;
+		if (!signal) throw new HermesError('The session request is no longer active.');
+		const instructions = await this.buildHermesInstructions(session, route);
+		const client = new HermesClient(this.plugin.settings.hermesServiceUrl, apiKey);
+		session.hermesClient = client;
+		session.resolvedRuntime = 'hermes';
+		this.refreshSessionUi(session);
+		this.setAssistantMeta(session, assistant, 'Hermes Agent | preparing external agent run');
+		const run = await client.startRun(question, session.id, instructions, signal);
+		session.hermesRunId = run.id;
+		this.setAssistantMeta(session, assistant, 'Hermes Agent | running tools and streaming output');
+		await client.streamRun(run.id, {
+			onDelta: (text) => {
+				onDelta(text);
+				if (this.isActive(session)) this.scrollToBottom();
+			},
+			onStatus: (status) => this.setAssistantMeta(session, assistant, status),
+		}, signal);
+		session.history.push({ role: 'assistant', content: assistant.message.content });
+		if (this.isActive(session) && assistant.bodyEl?.isConnected) await this.renderMarkdown(assistant.bodyEl, assistant.message.content);
+	}
+
+	private async buildHermesInstructions(session: ChatSession, route: RouteResult | null): Promise<string | null> {
+		const sections = ['You are operating through Sovereign Router. Do not expose API keys or secrets. Ask for approval through the Hermes runtime before any dangerous action.'];
+		if (route?.skill) {
+			const skill = await new SkillResolver(this.app, this.plugin.settings).resolve(route.skill);
+			if (skill.content) sections.push(`Follow this selected Sovereign skill when applicable:\n\n${skill.content}`);
+		}
+		const attachedContext = buildDocumentContext(session.documents);
+		if (attachedContext) sections.push(`Attached context:\n\n${attachedContext}`);
+		if (route?.context) {
+			try {
+				const resolved = await this.plugin.contextIndex.resolve(route.context.query);
+				if (resolved.content) sections.push(`Relevant vault context:\n\n${resolved.content}`);
+			} catch (_error) { /* Hermes can continue without vault context. */ }
+		}
+		return sections.join('\n\n');
+	}
+
 	private async routeForSession(session: ChatSession, question: string, apiKey: string): Promise<RouteResult> {
-		if (session.model) {
+		if (session.model && session.resolvedRuntime !== 'hermes') {
 			return {
 				model: session.model,
 				skill: session.skill,
 				context: session.context,
+				runtime: 'chat',
 				note: `Using the session model: ${modelLabel(session.model)}.`,
 			};
 		}
 
 		let route: RouteResult;
 		if (session.selectedModel) {
-			route = { model: session.selectedModel, skill: null, context: null, note: `Manual model: ${modelLabel(session.selectedModel)}.` };
+			route = { model: session.selectedModel, skill: null, context: null, runtime: 'chat', note: `Manual model: ${modelLabel(session.selectedModel)}.` };
 		} else {
 			try {
 				route = selectRoute(await routeWithGatekeeper(question, this.plugin.settings, apiKey), this.plugin.settings);
@@ -478,7 +584,12 @@ export class SovereignRouterView extends ItemView {
 				route = fallbackRoute(this.plugin.settings, 'Gatekeeper unavailable; using the default model for this session.');
 			}
 		}
-		session.model = route.model;
+		if (session.runtime === 'chat') route = { ...route, runtime: 'chat' };
+		if (route.runtime === 'hermes' && !this.hasHermesCredentials()) {
+			route = { ...route, runtime: 'chat', note: 'Hermes is not configured; using the selected chat model.' };
+		}
+		if (route.runtime === 'chat') session.model = route.model;
+		else session.resolvedRuntime = 'hermes';
 		session.skill = route.skill;
 		session.context = route.context;
 		this.refreshSessionUi(session);
@@ -566,6 +677,23 @@ export class SovereignRouterView extends ItemView {
 		}
 	}
 
+	private async cancelActiveRequest(): Promise<void> {
+		await this.cancelRequest(this.activeSession);
+	}
+
+	private async cancelRequest(session: ChatSession): Promise<void> {
+		const client = session.hermesClient;
+		const runId = session.hermesRunId;
+		if (client && runId) {
+			try {
+				await client.stopRun(runId);
+			} catch (_error) {
+				// The AbortController below still stops the local stream if Hermes is unreachable.
+			}
+		}
+		session.abortController?.abort();
+	}
+
 	private renderAttachments(): void {
 		const session = this.activeSession;
 		this.attachmentsEl.empty();
@@ -648,14 +776,10 @@ export class SovereignRouterView extends ItemView {
 		this.folderButton.disabled = controlsDisabled;
 		this.cancelButton.disabled = !session.abortController;
 		this.inputEl.disabled = controlsDisabled;
-		this.modelSelect.disabled = controlsDisabled || Boolean(session.model);
-		this.mcpToggle.disabled = controlsDisabled;
+		this.modelSelect.disabled = controlsDisabled || Boolean(session.model) || session.resolvedRuntime === 'hermes' || session.runtime === 'hermes';
+		this.runtimeSelect.disabled = controlsDisabled || Boolean(session.model) || Boolean(session.resolvedRuntime);
+		this.mcpToggle.disabled = controlsDisabled || session.resolvedRuntime === 'hermes' || session.runtime === 'hermes';
 		this.endSessionButton.disabled = Boolean(session.abortController) || session.isConvertingDocument;
-	}
-
-	private titleFor(question: string): string {
-		const compact = question.replace(/\s+/g, ' ').trim();
-		return compact.length > 28 ? `${compact.slice(0, 28)}…` : compact || 'Session';
 	}
 
 	private scrollToBottom(): void {

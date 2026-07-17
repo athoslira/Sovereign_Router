@@ -8,8 +8,9 @@
 .sr-header-note, .sr-message-meta { color: var(--text-muted); font-size: var(--font-ui-smaller); }
 .sr-session-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--background-modifier-border); }
 .sr-session-list { display: flex; flex: 1; gap: 6px; min-width: 0; overflow-x: auto; }
-.sr-session-actions { display: flex; flex: 0 0 auto; gap: 6px; }
-.sr-session-button, .sr-session-tab { white-space: nowrap; }
+.sr-session-actions { display: grid; flex: 0 0 220px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.sr-session-button, .sr-session-tab { min-width: 0; white-space: nowrap; }
+.sr-session-button { width: 100%; }
 .sr-session-tab { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
 .sr-session-tab.is-active { background: var(--interactive-accent); color: var(--text-on-accent); }
 .sr-session-status { padding: 0 12px 8px; color: var(--text-muted); font-size: var(--font-ui-smaller); }
@@ -24,8 +25,8 @@
 .sr-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .sr-attachment { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 6px; border-radius: 6px; background: var(--background-secondary); font-size: var(--font-ui-smaller); overflow-wrap: anywhere; }
 .sr-attachment-remove { padding: 1px 5px; font-size: var(--font-ui-smaller); }
-.sr-input { order: 2; width: 100%; resize: vertical; box-sizing: border-box; }
-.sr-actions { display: flex; order: 1; flex-wrap: wrap; justify-content: flex-start; gap: 8px; margin: 0 0 8px; }
-.sr-button { min-width: 72px; }
+.sr-input { order: 1; width: 100%; resize: vertical; box-sizing: border-box; }
+.sr-actions { display: grid; order: 2; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.sr-button { width: 100%; min-width: 0; }
 .sr-tool-arguments { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (max-width: 450px) { .sr-header, .sr-composer, .sr-messages { padding: 10px; } .sr-session-bar { padding: 8px 10px; align-items: flex-start; flex-direction: column; } .sr-session-list { width: 100%; } .sr-session-actions { width: 100%; } .sr-session-button { flex: 1; } .sr-session-status { padding: 0 10px 8px; } .sr-user .sr-message-body { max-width: 96%; } }
+@media (max-width: 450px) { .sr-header, .sr-composer, .sr-messages { padding: 10px; } .sr-header { align-items: flex-start; flex-direction: column; } .sr-header-controls { width: 100%; flex-wrap: wrap; } .sr-model-select { flex: 1 1 130px; max-width: none; } .sr-session-bar { padding: 8px 10px; align-items: flex-start; flex-direction: column; } .sr-session-list, .sr-session-actions { width: 100%; } .sr-session-actions { flex-basis: auto; } .sr-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sr-session-status { padding: 0 10px 8px; } .sr-user .sr-message-body { max-width: 96%; } }

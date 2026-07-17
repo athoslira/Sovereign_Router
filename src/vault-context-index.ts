@@ -177,7 +177,7 @@ export class VaultContextIndex {
 				try {
 					if (!await this.app.vault.adapter.exists(this.registryPath)) return;
 					const parsed = JSON.parse(await this.app.vault.adapter.read(this.registryPath)) as Partial<ContextRegistry>;
-					if (parsed.version === REGISTRY_VERSION && parsed.entries && typeof parsed.entries === 'object') this.registry = { version: REGISTRY_VERSION, entries: parsed.entries as Record<string, ContextEntry> };
+					if (parsed.version === REGISTRY_VERSION && parsed.entries && typeof parsed.entries === 'object') this.registry = { version: REGISTRY_VERSION, entries: parsed.entries };
 				} catch (_error) {
 					this.registry = { version: REGISTRY_VERSION, entries: {} };
 				} finally {

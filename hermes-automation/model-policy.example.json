@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "catalog_refresh_days": 15,
+  "rule": "Discovery is informative. Only an explicit user decision can make a model eligible for automatic routing.",
+  "manual_only_models": [],
+  "permitted_executor_models": [
+    "deepseek/deepseek-v4-flash",
+    "moonshotai/kimi-k2.7-code"
+  ]
+}

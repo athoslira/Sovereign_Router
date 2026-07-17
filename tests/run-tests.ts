@@ -3,6 +3,7 @@ import { buildDocumentContext, limitDocumentContent, MAX_DOCUMENT_CHARS } from '
 import { isSupportedDocument, isTextDocument, needsDoclingConversion } from '../src/document-files';
 import { contextTerms, extractContextExcerpt, rankContextEntries } from '../src/context-search';
 import { DEFAULT_EXECUTOR_MODELS, modelLabel } from '../src/models';
+import { isCatalogFresh, normalizeOpenRouterModels } from '../src/model-catalog';
 import { parseMcpToolCalls, toExecutorTools } from '../src/mcp-tools';
 import { canCallMcpTool, isAllowedMcpEndpoint } from '../src/mcp-policy';
 import { parseGatekeeperDecision, selectRoute } from '../src/routing';
@@ -15,12 +16,18 @@ const settings: SovereignRouterSettings = {
 	gatekeeperModel: 'deepseek/deepseek-v4-flash',
 	defaultExecutorModel: 'moonshotai/kimi-k2.7-code',
 	permittedExecutorModels: ['moonshotai/kimi-k2.7-code'],
+	customModelSlugs: [],
+	modelCatalog: null,
+	modelCatalogRefreshDays: 15,
 	modelCatalogVersion: 1,
 	routingInstruction: '',
 	skillSearchPaths: [],
 	allowedGitHubRepos: [],
 	doclingServiceUrl: '',
 	doclingSecretName: '',
+	hermesServiceUrl: '',
+	hermesSecretName: '',
+	enableHermesAutoRouting: false,
 	mcpServers: [],
 };
 
@@ -36,6 +43,9 @@ run('validates permitted routes, context decisions, and fallback routes', () => 
 	assert.equal(parseGatekeeperDecision({ model: 'invalid' }), null);
 	const unpermitted = parseGatekeeperDecision({ model: 'untrusted/model', skill: null, context: null });
 	assert.equal(selectRoute(unpermitted, settings).model, settings.defaultExecutorModel);
+	const hermes = parseGatekeeperDecision({ model: settings.defaultExecutorModel, runtime: 'hermes', skill: null, context: null });
+	assert.equal(selectRoute(hermes, settings).runtime, 'chat');
+	assert.equal(selectRoute(hermes, { ...settings, enableHermesAutoRouting: true }).runtime, 'hermes');
 });
 
 run('blocks unsafe skill paths and unapproved GitHub repositories', () => {
@@ -58,6 +68,19 @@ run('exposes the requested model catalogue with the canonical Kimi slug', () => 
 	assert.equal(DEFAULT_EXECUTOR_MODELS.length, 6);
 	assert.equal(DEFAULT_EXECUTOR_MODELS.includes('moonshotai/kimi-k2.7-code'), true);
 	assert.equal(modelLabel('x-ai/grok-4.3'), 'Grok 4.3');
+});
+
+run('normalizes OpenRouter catalog data without auto-authorizing discovered models', () => {
+	const catalog = normalizeOpenRouterModels({ data: [{
+		id: 'provider/example', name: 'Example', context_length: 128000,
+		architecture: { input_modalities: ['text', 'image'], output_modalities: ['text'] },
+		supported_parameters: ['tools'], pricing: { prompt: 0.000001, completion: 0.000002, input_cache_read: 0.0000001 },
+	}] }, 1000);
+	assert.equal(catalog.models[0]?.supportsTools, true);
+	assert.equal(catalog.models[0]?.pricing.input, 0.000001);
+	assert.equal(settings.permittedExecutorModels.includes('provider/example'), false);
+	assert.equal(isCatalogFresh(catalog, 15, 1001), true);
+	assert.equal(isCatalogFresh(catalog, 15, 1000 + 16 * 24 * 60 * 60 * 1000), false);
 });
 
 run('limits document context while preserving the attachment label', () => {

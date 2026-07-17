@@ -13,6 +13,9 @@ export default defineConfig(
 		'package.json',
 		'package-lock.json',
 		'tsconfig.json',
+		'tests/compiled',
+		'tests',
+		'mcp-connectors/*.mjs',
 	]),
 	{
 		languageOptions: {

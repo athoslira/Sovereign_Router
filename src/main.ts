@@ -1,5 +1,6 @@
-import { Notice, Plugin, WorkspaceLeaf } from 'obsidian';
+import { Notice, Plugin, requestUrl } from 'obsidian';
 import { DEFAULT_EXECUTOR_MODELS } from './models';
+import { fetchOpenRouterModelCatalog, isCatalogFresh } from './model-catalog';
 import { DEFAULT_SETTINGS, SovereignRouterSettingTab, SovereignRouterSettings } from './settings';
 import { SovereignRouterView, VIEW_TYPE_SOVEREIGN_ROUTER } from './ui/chat-view';
 import { VaultContextIndex } from './vault-context-index';
@@ -33,11 +34,11 @@ export default class SovereignRouterPlugin extends Plugin {
 			callback: () => void this.activateChatView(),
 		});
 		this.addSettingTab(new SovereignRouterSettingTab(this.app, this));
+		void this.refreshModelCatalogIfDue();
 	}
 
 	onunload(): void {
 		this.contextIndex.dispose();
-		this.app.workspace.detachLeavesOfType(VIEW_TYPE_SOVEREIGN_ROUTER);
 	}
 
 	async loadSettings(): Promise<void> {
@@ -54,10 +55,37 @@ export default class SovereignRouterPlugin extends Plugin {
 			this.settings.modelCatalogVersion = 1;
 			await this.saveSettings();
 		}
+		this.settings.customModelSlugs = this.settings.customModelSlugs ?? [];
+		this.settings.modelCatalog = this.settings.modelCatalog ?? null;
+		this.settings.modelCatalogRefreshDays = Math.max(1, this.settings.modelCatalogRefreshDays || 15);
+		this.settings.hermesServiceUrl = this.settings.hermesServiceUrl ?? '';
+		this.settings.hermesSecretName = this.settings.hermesSecretName ?? '';
+		this.settings.enableHermesAutoRouting = this.settings.enableHermesAutoRouting ?? false;
 	}
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+	}
+
+	manualModelOptions(): string[] {
+		return Array.from(new Set([...this.settings.permittedExecutorModels, ...this.settings.customModelSlugs]));
+	}
+
+	async refreshModelCatalog(): Promise<void> {
+		const secretName = this.settings.openRouterSecretName;
+		const apiKey = secretName ? this.app.secretStorage.getSecret(secretName) : null;
+		if (!apiKey) throw new Error('Select an OpenRouter API key before refreshing the model catalog.');
+		this.settings.modelCatalog = await fetchOpenRouterModelCatalog(apiKey, async (url, headers) => requestUrl({ url, method: 'GET', headers, throw: false }));
+		await this.saveSettings();
+	}
+
+	private async refreshModelCatalogIfDue(): Promise<void> {
+		if (isCatalogFresh(this.settings.modelCatalog, this.settings.modelCatalogRefreshDays)) return;
+		try {
+			await this.refreshModelCatalog();
+		} catch (_error) {
+			// A catalog refresh is opportunistic; chat remains usable offline or without a key.
+		}
 	}
 
 	private async activateChatView(): Promise<void> {
@@ -69,6 +97,6 @@ export default class SovereignRouterPlugin extends Plugin {
 		}
 
 		await leaf.setViewState({ type: VIEW_TYPE_SOVEREIGN_ROUTER, active: true });
-		this.app.workspace.revealLeaf(leaf as WorkspaceLeaf);
+		await this.app.workspace.revealLeaf(leaf);
 	}
 }

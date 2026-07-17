@@ -8,5 +8,5 @@
     "module": "CommonJS",
     "moduleResolution": "node"
   },
-  "include": ["src/context-search.ts", "src/document-context.ts", "src/document-files.ts", "src/models.ts", "src/routing.ts", "src/skill-policy.ts", "src/sse.ts", "src/types.ts", "tests/**/*.ts"]
+  "include": ["src/context-search.ts", "src/document-context.ts", "src/document-files.ts", "src/model-catalog.ts", "src/models.ts", "src/routing.ts", "src/skill-policy.ts", "src/sse.ts", "src/types.ts", "tests/**/*.ts"]
 }

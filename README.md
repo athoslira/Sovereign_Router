@@ -15,6 +15,22 @@ The plugin includes automatic routing and a manual selector for these OpenRouter
 
 All six are enabled in the default permitted executor list. The canonical OpenRouter slug for Kimi is `moonshotai/kimi-k2.7-code`.
 
+## Dynamic model catalog and model policy
+
+The settings panel can refresh the official OpenRouter model catalog and stores only non-sensitive metadata: model ID/name, context window, supported modalities, tool support, and OpenRouter's reference token prices. It refreshes opportunistically when Obsidian is open and the cache is older than 15 days (configurable). Actual response cost continues to come exclusively from OpenRouter's `usage.cost` event.
+
+- Add a slug to **Manual-only models** to make it selectable in a chat without granting it automatic routing.
+- Add a slug to **Permitted executor models** only when it is approved for Gatekeeper routing.
+- [`hermes-automation/`](hermes-automation/README.md) contains a no-dependency job that Hermes can schedule every 15 days for unattended catalog research. It produces a reviewable JSON catalog and never changes model permissions by itself.
+
+## Hermes Agent runtime
+
+The chat header has an execution runtime selector: **Sovereign chat** uses the existing OpenRouter, local-skill, vault-context, and remote-MCP path; **Hermes Agent** delegates an execution-oriented task to a separately configured Hermes API server; **Auto runtime** lets the Gatekeeper choose Hermes only when automatic Hermes routing is explicitly enabled.
+
+To use Hermes, install and configure its API server separately, then set its HTTPS (or loopback HTTP) URL and API key in **Settings → Sovereign Router**. The key is kept in Obsidian SecretStorage. Sovereign Router calls Hermes' run API and streams progress/output into the session; **Cancel** also asks Hermes to stop the remote run. The plugin does not install Hermes, start a terminal, launch subprocesses, or enable local MCP servers itself.
+
+When Hermes performs terminal, subagent, cron, or local stdio MCP work, its own approval and security policies remain authoritative. Keep the Hermes API on loopback or behind authenticated HTTPS.
+
 ## Documents with Docling
 
 Docling is a Python project, so it is not bundled into this TypeScript/mobile plugin. Instead, Sovereign Router connects to an optional [docling-serve API](https://docling-project.github.io/docling/usage/api_server/) that converts an attached document into Markdown.
@@ -51,6 +67,7 @@ Sovereign Router can call tools from remote MCP servers through Streamable HTTP.
 - Conversations remain only in the open chat panel. The local context index persists file references and search terms; converted external attachments persist only in the local plugin cache until you clear them. The plugin collects no telemetry, edits no notes, and executes no remote code.
 - Remote skills are fetched as Markdown only from GitHub repositories you explicitly allow. They are never executed or saved to the vault.
 - MCP servers receive only the arguments of a tool call that you enabled in the chat. Their tools can be selected by OpenRouter only after their schemas have been loaded for that request.
+- Hermes receives the prompt and any context selected for a Hermes session. It is an optional external runtime and is configured only when you choose to use it.
 
 ## Development
 
