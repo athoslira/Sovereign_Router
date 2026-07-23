@@ -31,11 +31,25 @@ To use Hermes, install and configure its API server separately, then set its HTT
 
 When Hermes performs terminal, subagent, cron, or local stdio MCP work, its own approval and security policies remain authoritative. Keep the Hermes API on loopback or behind authenticated HTTPS.
 
+## Sovereign control center
+
+Use **Sovereign Router: Open control center** from the command palette, or select **Control** in the chat header, to use Sovereign Router as the operational control plane.
+
+- The status cards report whether OpenRouter and Hermes credentials are available, the local vault-context index state, cached external documents, enabled MCP connections, and the model catalog timestamp.
+- **OpenRouter FinOps** aggregates only effective `usage.cost` values received while the plugin remains open. It stores no prompts, messages, files, or telemetry and resets when Obsidian unloads the plugin.
+- **Test connection** verifies the configured Hermes API without starting an agent. When the server advertises capabilities, the panel also reports whether its jobs API is available.
+- **Refresh catalog** updates only non-sensitive model metadata. It does not authorize models for automatic routing.
+- When Hermes is configured, **Hermes automations** can load scheduled jobs, create a self-contained job, edit its schedule and provider/skill overrides, run it once, pause/resume it, or delete it. Job prompts are sent directly to Hermes and are never stored or shown again by Sovereign Router.
+- Every run, pause, resume, and delete action requires a confirmation in Obsidian. Hermes remains the execution authority for its own tool permissions and dangerous-command approvals.
+- Provider overrides are denied unless they appear in **Permitted Hermes provider overrides**. An empty list forces the runtime default provider. Hermes itself owns the actual model configuration; the model field it reports through the API is informational.
+
+The control center intentionally does not expose a terminal, local stdio MCPs, or unrestricted file access through the Obsidian plugin. It governs those capabilities through Hermes rather than duplicating them.
+
 ## Documents with Docling
 
 Docling is a Python project, so it is not bundled into this TypeScript/mobile plugin. Instead, Sovereign Router connects to an optional [docling-serve API](https://docling-project.github.io/docling/usage/api_server/) that converts an attached document into Markdown.
 
-1. Start a Docling service, for example `docling-serve run`, and make its URL reachable from the device running Obsidian. The default local endpoint is `http://localhost:5001`.
+1. Start a Docling service, for example `docling-serve run`, and make its URL reachable from the device running Obsidian. The plugin accepts HTTPS, or HTTP only for a local endpoint such as `http://localhost:5001`.
 2. In **Settings → Sovereign Router**, set the **Docling service URL**. If the service requires authentication, select its API key through SecretStorage.
 3. Use **Attach document** to select files from the device, or **Attach vault folder** to select a folder from the current vault. Folder import walks supported files recursively: text and Markdown files are read through the Vault API, while PDFs and Office documents use Docling.
 4. Converted content is available in the open chat session and is also added to the local context library so it can be retrieved automatically in future relevant chats.
@@ -75,3 +89,5 @@ Sovereign Router can call tools from remote MCP servers through Streamable HTTP.
 2. Run `npm run build` and `npm test`.
 3. Copy `main.js`, `manifest.json`, and `styles.css` into `<Vault>/.obsidian/plugins/sovereign-router/`.
 4. In Obsidian, reload community plugins, enable **Sovereign Router**, then select an OpenRouter API key in its settings.
+
+For the full automated and manual verification checklist, see [TESTING_GUIDE.md](TESTING_GUIDE.md).

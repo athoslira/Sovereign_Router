@@ -1,14 +1,8 @@
 import type { McpServerConfig, McpTool } from './mcp-types';
+import { isSecureOrLocalHttpEndpoint } from './endpoint-policy';
 
 export function isAllowedMcpEndpoint(value: string): boolean {
-	try {
-		const url = new URL(value);
-		if (url.username || url.password || url.search || url.hash) return false;
-		if (url.protocol === 'https:') return true;
-		return url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]');
-	} catch (_error) {
-		return false;
-	}
+	return isSecureOrLocalHttpEndpoint(value);
 }
 
 export function isReadOnlyMcpTool(tool: McpTool): boolean {

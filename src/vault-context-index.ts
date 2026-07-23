@@ -23,6 +23,12 @@ export interface ResolvedVaultContext {
 	note: string | null;
 }
 
+export interface VaultContextIndexStatus {
+	vaultEntries: number;
+	externalEntries: number;
+	isIndexing: boolean;
+}
+
 export class VaultContextIndex {
 	private readonly directory: string;
 	private readonly registryPath: string;
@@ -114,6 +120,16 @@ export class VaultContextIndex {
 		}
 		if (sections.length === 0) return { content: null, note: 'Matching context is no longer available.' };
 		return { content: sections.join('\n\n---\n\n'), note: `Loaded local context from ${sections.length} file${sections.length === 1 ? '' : 's'}.` };
+	}
+
+	async getStatus(): Promise<VaultContextIndexStatus> {
+		await this.load();
+		const entries = Object.values(this.registry.entries);
+		return {
+			vaultEntries: entries.filter((entry) => entry.source === 'vault').length,
+			externalEntries: entries.filter((entry) => entry.source === 'external').length,
+			isIndexing: this.indexing !== null,
+		};
 	}
 
 	private async indexAll(): Promise<void> {

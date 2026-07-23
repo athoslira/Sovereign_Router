@@ -13,6 +13,7 @@ import { fallbackRoute, selectRoute } from '../routing';
 import { SkillResolver } from '../skills';
 import type { ChatMessage, OpenRouterToolCall, RouteResult, SessionRuntime, SkillReference, Usage, VaultContextReference } from '../types';
 import { confirmMcpToolCall } from './tool-confirmation-modal';
+import { openControlCenter } from './control-center-modal';
 import { VaultFolderPicker } from './vault-folder-picker';
 
 export const VIEW_TYPE_SOVEREIGN_ROUTER = 'sovereign-router-chat';
@@ -21,6 +22,8 @@ interface SessionDisplayMessage {
 	role: 'user' | 'assistant';
 	content: string;
 	meta?: string;
+	finOpsCost?: number;
+	finOpsModel?: string;
 }
 
 interface AssistantElements {
@@ -113,6 +116,7 @@ export class SovereignRouterView extends ItemView {
 		const header = this.containerEl.createDiv({ cls: 'sr-header' });
 		header.createEl('h4', { text: 'Sovereign Router' });
 		const controls = header.createDiv({ cls: 'sr-header-controls' });
+		const controlCenterButton = controls.createEl('button', { text: 'Control', cls: 'sr-control-button', attr: { 'aria-label': 'Open control center' } });
 		this.runtimeSelect = controls.createEl('select', { cls: 'sr-model-select', attr: { 'aria-label': 'Execution runtime' } });
 		this.runtimeSelect.createEl('option', { text: 'Auto runtime', value: 'auto' });
 		this.runtimeSelect.createEl('option', { text: 'Sovereign chat', value: 'chat' });
@@ -175,6 +179,7 @@ export class SovereignRouterView extends ItemView {
 			const session = this.activeSession;
 			if (!session.model) session.selectedModel = this.modelSelect.value;
 		});
+		this.registerDomEvent(controlCenterButton, 'click', () => openControlCenter(this.app, this.plugin));
 		this.registerDomEvent(this.runtimeSelect, 'change', () => {
 			const session = this.activeSession;
 			if (!session.resolvedRuntime) session.runtime = this.runtimeSelect.value as SessionRuntime;
@@ -478,8 +483,11 @@ export class SovereignRouterView extends ItemView {
 					this.setAssistantContent(session, assistant, assistantText);
 					if (this.isActive(session)) this.scrollToBottom();
 				},
-				onUsage: (usage: Usage) => this.setAssistantMeta(session, assistant, formatUsage(route.model, usage)),
-				onModel: (model: string) => this.setAssistantMeta(session, assistant, formatUsage(model)),
+				onUsage: (usage: Usage) => this.recordUsage(session, assistant, route.model, usage),
+				onModel: (model: string) => {
+					assistant.message.finOpsModel = model;
+					this.setAssistantMeta(session, assistant, formatUsage(model));
+				},
 			};
 			await this.runExecutorWithMcp(session, route.model, skill.content, documentContext, apiKey, callbacks, assistant, catalog, executorTools, (text) => {
 				assistantText = text;
@@ -631,7 +639,8 @@ export class SovereignRouterView extends ItemView {
 				const fallback = await completeExecutor(model, session.history, skillContent, documentContext, apiKey, executorTools);
 				setText(fallback.content);
 				toolCalls = fallback.toolCalls;
-				this.setAssistantMeta(session, assistant, formatUsage(fallback.model, fallback.usage, 'non-streaming fallback'));
+				if (fallback.usage) this.recordUsage(session, assistant, fallback.model, fallback.usage, 'non-streaming fallback');
+				else this.setAssistantMeta(session, assistant, formatUsage(fallback.model, undefined, 'non-streaming fallback'));
 			}
 			if (toolCalls.length === 0) {
 				session.history.push({ role: 'assistant', content: getText() });
@@ -753,6 +762,15 @@ export class SovereignRouterView extends ItemView {
 	private setAssistantMeta(session: ChatSession, assistant: AssistantElements, meta: string): void {
 		assistant.message.meta = meta;
 		if (this.isActive(session) && assistant.metaEl?.isConnected) assistant.metaEl.setText(meta);
+	}
+
+	private recordUsage(session: ChatSession, assistant: AssistantElements, model: string, usage: Usage, suffix?: string): void {
+		assistant.message.finOpsModel = assistant.message.finOpsModel ?? model;
+		if (typeof usage.cost === 'number') {
+			this.plugin.operationalMetrics.recordDirectResponseCost(assistant.message.finOpsCost, usage.cost);
+			assistant.message.finOpsCost = usage.cost;
+		}
+		this.setAssistantMeta(session, assistant, formatUsage(assistant.message.finOpsModel, usage, suffix));
 	}
 
 	private async renderMarkdown(element: HTMLElement, content: string): Promise<void> {

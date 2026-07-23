@@ -1,5 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { buildDocumentContext, limitDocumentContent, MAX_DOCUMENT_CHARS } from '../src/document-context';
+import { isSecureOrLocalHttpEndpoint } from '../src/endpoint-policy';
 import { isSupportedDocument, isTextDocument, needsDoclingConversion } from '../src/document-files';
 import { contextTerms, extractContextExcerpt, rankContextEntries } from '../src/context-search';
 import { DEFAULT_EXECUTOR_MODELS, modelLabel } from '../src/models';
@@ -8,6 +9,9 @@ import { parseMcpToolCalls, toExecutorTools } from '../src/mcp-tools';
 import { canCallMcpTool, isAllowedMcpEndpoint } from '../src/mcp-policy';
 import { parseGatekeeperDecision, selectRoute } from '../src/routing';
 import { isAllowedGitHubRepository, isSafeRelativePath } from '../src/skill-policy';
+import { hermesProviderOverrideError } from '../src/hermes-policy';
+import { OperationalMetrics } from '../src/operational-metrics';
+import { normalizeHermesJobs, parseHermesRuntimeStatus } from '../src/hermes';
 import { SseParser } from '../src/sse';
 import type { SovereignRouterSettings } from '../src/settings';
 
@@ -28,6 +32,7 @@ const settings: SovereignRouterSettings = {
 	hermesServiceUrl: '',
 	hermesSecretName: '',
 	enableHermesAutoRouting: false,
+	hermesPermittedProviderOverrides: [],
 	mcpServers: [],
 };
 
@@ -97,6 +102,13 @@ run('classifies vault files for local reading or Docling conversion', () => {
 	assert.equal(isSupportedDocument('archive.zip'), false);
 });
 
+run('restricts Docling transport to HTTPS or local HTTP', () => {
+	assert.equal(isSecureOrLocalHttpEndpoint('https://docling.example.com/api'), true);
+	assert.equal(isSecureOrLocalHttpEndpoint('http://localhost:5001'), true);
+	assert.equal(isSecureOrLocalHttpEndpoint('http://docling.example.com'), false);
+	assert.equal(isSecureOrLocalHttpEndpoint('https://key@docling.example.com'), false);
+});
+
 run('indexes and retrieves focused local context without retaining raw vault text', () => {
 	const terms = contextTerms('Projeto Héstia possui roteiro, roteiro e orçamento.');
 	assert.equal(terms.includes('roteiro'), true);
@@ -127,4 +139,38 @@ run('maps only known MCP tools from model calls', () => {
 	assert.ok(executorTool);
 	const calls = parseMcpToolCalls([{ id: 'call-1', type: 'function', function: { name: executorTool.function.name, arguments: '{"city":"Sao Paulo"}' } }], [tool]);
 	assert.equal('error' in calls[0]!, false);
+});
+
+run('normalizes Hermes job payloads without retaining job prompts', () => {
+	const jobs = normalizeHermesJobs({ jobs: [
+		{ id: 'job-1', name: 'Catalog refresh', schedule: '0 3 */15 * *', paused: false, last_run_at: '2026-07-20T03:00:00Z', model: 'deepseek/deepseek-v4-flash', skills: ['catalog-research'] },
+		{ job_id: 'job-2', cron: '0 */6 * * *', enabled: false, prompt: 'This must not be copied into the control panel.' },
+	] });
+	assert.equal(jobs.length, 2);
+	assert.equal(jobs[0]?.status, 'active');
+	assert.equal(jobs[0]?.model, 'deepseek/deepseek-v4-flash');
+	assert.deepEqual(jobs[0]?.skills, ['catalog-research']);
+	assert.equal(jobs[1]?.status, 'paused');
+	assert.equal(JSON.stringify(jobs).includes('must not be copied'), false);
+});
+
+run('detects Hermes job support only from declared capabilities', () => {
+	assert.equal(parseHermesRuntimeStatus({ endpoints: { jobs: true } }, 'capabilities').jobsSupported, true);
+	assert.equal(parseHermesRuntimeStatus({ features: { session_jobs: false } }, 'capabilities').jobsSupported, false);
+	assert.equal(parseHermesRuntimeStatus({ data: [] }, 'models').jobsSupported, null);
+});
+
+run('enforces explicit Hermes provider override policy', () => {
+	assert.equal(hermesProviderOverrideError(null, []), null);
+	assert.equal(hermesProviderOverrideError('openrouter', []), 'The Hermes provider override is not in the permitted list.');
+	assert.equal(hermesProviderOverrideError('openrouter', ['openrouter']), null);
+	assert.equal(hermesProviderOverrideError('unknown', ['openrouter']), 'The Hermes provider override is not in the permitted list.');
+});
+
+run('keeps local FinOps totals only in memory and avoids duplicate usage events', () => {
+	const metrics = new OperationalMetrics();
+	metrics.recordDirectResponseCost(undefined, 0.012);
+	metrics.recordDirectResponseCost(0.012, 0.015);
+	metrics.recordDirectResponseCost(0.015, 0.015);
+	assert.deepEqual(metrics.snapshot(), { directResponses: 1, directCostUsd: 0.015 });
 });

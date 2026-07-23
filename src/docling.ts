@@ -1,4 +1,5 @@
 import { requestUrl } from 'obsidian';
+import { isSecureOrLocalHttpEndpoint } from './endpoint-policy';
 
 const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
 
@@ -26,15 +27,8 @@ function toBase64(buffer: ArrayBuffer): string {
 }
 
 function normalizedServiceUrl(value: string): string {
-	let url: URL;
-	try {
-		url = new URL(value);
-	} catch {
-		throw new DoclingError('The Docling service URL is invalid.');
-	}
-	if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-		throw new DoclingError('The Docling service URL must use HTTP or HTTPS.');
-	}
+	if (!isSecureOrLocalHttpEndpoint(value)) throw new DoclingError('The Docling service URL must use HTTPS, or HTTP only on localhost.');
+	const url = new URL(value);
 	return url.toString().replace(/\/$/, '');
 }
 
