@@ -22,6 +22,7 @@ export interface SovereignRouterSettings {
 	hermesServiceUrl: string;
 	hermesSecretName: string;
 	enableHermesAutoRouting: boolean;
+	hermesPermittedProviderOverrides: string[];
 	mcpServers: McpServerConfig[];
 }
 
@@ -42,6 +43,7 @@ export const DEFAULT_SETTINGS: SovereignRouterSettings = {
 	hermesServiceUrl: '',
 	hermesSecretName: '',
 	enableHermesAutoRouting: false,
+	hermesPermittedProviderOverrides: [],
 	mcpServers: [],
 };
 
@@ -88,7 +90,7 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 		this.addTextAreaSetting('Local skill folders', 'Vault-relative folders searched in order, one per line.', this.plugin.settings.skillSearchPaths.join('\n'), async (value) => { this.plugin.settings.skillSearchPaths = splitLines(value); });
 		this.addTextAreaSetting('Allowed GitHub repositories', 'One owner/repository pair per line. Remote skills from any other repository are rejected.', this.plugin.settings.allowedGitHubRepos.join('\n'), async (value) => { this.plugin.settings.allowedGitHubRepos = splitLines(value); });
 		new Setting(containerEl).setName('Document conversion (Docling)').setHeading();
-		this.addTextSetting('Docling service URL', 'Optional. Enter the URL of your docling-serve instance, such as http://localhost:5001.', this.plugin.settings.doclingServiceUrl, async (value) => { this.plugin.settings.doclingServiceUrl = value.replace(/\/$/, ''); });
+		this.addTextSetting('Docling service URL', 'Optional. Use HTTPS, or HTTP only for a local docling-serve instance such as http://localhost:5001.', this.plugin.settings.doclingServiceUrl, async (value) => { this.plugin.settings.doclingServiceUrl = value.replace(/\/$/, ''); });
 		new Setting(containerEl).setName('Docling API key').setDesc('Optional. Choose the secret required by your Docling service. The plugin stores only its reference.').addComponent((component) => {
 			const secretComponent = new SecretComponent(this.app, component).setValue(this.plugin.settings.doclingSecretName);
 			secretComponent.onChange(async (value) => {
@@ -112,6 +114,7 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 			this.plugin.settings.enableHermesAutoRouting = value;
 			await this.plugin.saveSettings();
 		}));
+		this.addTextAreaSetting('Permitted Hermes provider overrides', 'One configured Hermes provider profile per line. Leave empty to require the runtime default provider.', this.plugin.settings.hermesPermittedProviderOverrides.join('\n'), async (value) => { this.plugin.settings.hermesPermittedProviderOverrides = splitLines(value); });
 		new Setting(containerEl).setName('Automatic vault context').setHeading();
 		containerEl.createEl('p', { text: 'The current vault is indexed locally after Obsidian loads. The Gatekeeper can request relevant context after routing; only those excerpts are sent to OpenRouter. Documents attached through Docling are added to the local context library automatically.' });
 		new Setting(containerEl).setName('Clear stored external documents').setDesc('Deletes only the converted document cache. Vault files remain in the local index and are always read from their current vault version.').addButton((button) => button.setWarning().setButtonText('Clear cache').onClick(async () => {

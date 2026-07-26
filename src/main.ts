@@ -2,12 +2,15 @@ import { Notice, Plugin, requestUrl } from 'obsidian';
 import { DEFAULT_EXECUTOR_MODELS } from './models';
 import { fetchOpenRouterModelCatalog, isCatalogFresh } from './model-catalog';
 import { DEFAULT_SETTINGS, SovereignRouterSettingTab, SovereignRouterSettings } from './settings';
+import { OperationalMetrics } from './operational-metrics';
 import { SovereignRouterView, VIEW_TYPE_SOVEREIGN_ROUTER } from './ui/chat-view';
+import { openControlCenter } from './ui/control-center-modal';
 import { VaultContextIndex } from './vault-context-index';
 
 export default class SovereignRouterPlugin extends Plugin {
 	settings!: SovereignRouterSettings;
 	contextIndex!: VaultContextIndex;
+	readonly operationalMetrics = new OperationalMetrics();
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -32,6 +35,11 @@ export default class SovereignRouterPlugin extends Plugin {
 			id: 'open-chat',
 			name: 'Open chat',
 			callback: () => void this.activateChatView(),
+		});
+		this.addCommand({
+			id: 'open-control-center',
+			name: 'Open control center',
+			callback: () => openControlCenter(this.app, this),
 		});
 		this.addSettingTab(new SovereignRouterSettingTab(this.app, this));
 		void this.refreshModelCatalogIfDue();
@@ -61,10 +69,21 @@ export default class SovereignRouterPlugin extends Plugin {
 		this.settings.hermesServiceUrl = this.settings.hermesServiceUrl ?? '';
 		this.settings.hermesSecretName = this.settings.hermesSecretName ?? '';
 		this.settings.enableHermesAutoRouting = this.settings.enableHermesAutoRouting ?? false;
+		this.settings.hermesPermittedProviderOverrides = this.settings.hermesPermittedProviderOverrides ?? [];
 	}
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+	}
+
+	openSettings(): void {
+		const settings = (this.app as unknown as { setting?: { open?: () => void; openTabById?: (id: string) => void } }).setting;
+		if (!settings?.open || !settings.openTabById) {
+			new Notice('Open Settings → Sovereign Router to change policies and connections.');
+			return;
+		}
+		settings.open();
+		settings.openTabById(this.manifest.id);
 	}
 
 	manualModelOptions(): string[] {
