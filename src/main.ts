@@ -1,5 +1,6 @@
 import { Notice, Plugin, requestUrl } from 'obsidian';
 import { DEFAULT_EXECUTOR_MODELS } from './models';
+import { DEFAULT_HERMES_MODEL_ALIAS, DEFAULT_HERMES_MODEL_ROUTES } from './hermes-models';
 import { fetchOpenRouterModelCatalog, isCatalogFresh } from './model-catalog';
 import { DEFAULT_SETTINGS, SovereignRouterSettingTab, SovereignRouterSettings } from './settings';
 import { OperationalMetrics } from './operational-metrics';
@@ -69,6 +70,8 @@ export default class SovereignRouterPlugin extends Plugin {
 		this.settings.hermesServiceUrl = this.settings.hermesServiceUrl ?? '';
 		this.settings.hermesSecretName = this.settings.hermesSecretName ?? '';
 		this.settings.enableHermesAutoRouting = this.settings.enableHermesAutoRouting ?? false;
+		this.settings.hermesModelRoutes = this.settings.hermesModelRoutes?.length ? this.settings.hermesModelRoutes : DEFAULT_HERMES_MODEL_ROUTES.map((route) => ({ ...route }));
+		this.settings.hermesDefaultModelAlias = this.settings.hermesDefaultModelAlias ?? DEFAULT_HERMES_MODEL_ALIAS;
 		this.settings.hermesPermittedProviderOverrides = this.settings.hermesPermittedProviderOverrides ?? [];
 	}
 

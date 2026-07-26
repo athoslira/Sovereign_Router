@@ -1,6 +1,7 @@
 import { App, Notice, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type SovereignRouterPlugin from './main';
 import { DEFAULT_EXECUTOR_MODELS } from './models';
+import { DEFAULT_HERMES_MODEL_ALIAS, DEFAULT_HERMES_MODEL_ROUTES, formatHermesModelRoutes, parseHermesModelRoutes, type HermesModelRoute } from './hermes-models';
 import type { ModelCatalogSnapshot } from './model-catalog';
 import type { McpServerConfig } from './mcp-types';
 import { isAllowedMcpEndpoint } from './mcp-policy';
@@ -22,6 +23,8 @@ export interface SovereignRouterSettings {
 	hermesServiceUrl: string;
 	hermesSecretName: string;
 	enableHermesAutoRouting: boolean;
+	hermesModelRoutes: HermesModelRoute[];
+	hermesDefaultModelAlias: string;
 	hermesPermittedProviderOverrides: string[];
 	mcpServers: McpServerConfig[];
 }
@@ -43,6 +46,8 @@ export const DEFAULT_SETTINGS: SovereignRouterSettings = {
 	hermesServiceUrl: '',
 	hermesSecretName: '',
 	enableHermesAutoRouting: false,
+	hermesModelRoutes: DEFAULT_HERMES_MODEL_ROUTES,
+	hermesDefaultModelAlias: DEFAULT_HERMES_MODEL_ALIAS,
 	hermesPermittedProviderOverrides: [],
 	mcpServers: [],
 };
@@ -55,7 +60,7 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('p', { text: 'Messages and selected skills are sent to OpenRouter only when you send a chat message. Attached documents are sent to the configured Docling service. No conversation or document is saved by this plugin.' });
+		containerEl.createEl('p', { text: 'Sovereign chat messages and selected skills are sent to OpenRouter. Hermes sessions use models, native skills, and MCPs configured in Hermes; a selected Sovereign skill may be supplied as read-only strategy text. Attached documents are sent to the configured Docling service. No conversation or document is saved by this plugin.' });
 		new Setting(containerEl).setName('OpenRouter API key').setDesc('Choose or create a secret. The plugin stores only its reference in data.json.').addComponent((component) => {
 			const secretComponent = new SecretComponent(this.app, component).setValue(this.plugin.settings.openRouterSecretName);
 			secretComponent.onChange(async (value) => {
@@ -114,6 +119,8 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 			this.plugin.settings.enableHermesAutoRouting = value;
 			await this.plugin.saveSettings();
 		}));
+		this.addTextAreaSetting('Hermes model routes', 'One approved alias and OpenRouter model slug per line: alias = provider/model. Configure the same aliases in Hermes before enabling automatic routing.', formatHermesModelRoutes(this.plugin.settings.hermesModelRoutes), async (value) => { this.plugin.settings.hermesModelRoutes = parseHermesModelRoutes(value); });
+		this.addTextSetting('Default Hermes model route', 'Used for a manually selected Hermes session and when the Gatekeeper cannot select a permitted Hermes route.', this.plugin.settings.hermesDefaultModelAlias, async (value) => { this.plugin.settings.hermesDefaultModelAlias = value; });
 		this.addTextAreaSetting('Permitted Hermes provider overrides', 'One configured Hermes provider profile per line. Leave empty to require the runtime default provider.', this.plugin.settings.hermesPermittedProviderOverrides.join('\n'), async (value) => { this.plugin.settings.hermesPermittedProviderOverrides = splitLines(value); });
 		new Setting(containerEl).setName('Automatic vault context').setHeading();
 		containerEl.createEl('p', { text: 'The current vault is indexed locally after Obsidian loads. The Gatekeeper can request relevant context after routing; only those excerpts are sent to OpenRouter. Documents attached through Docling are added to the local context library automatically.' });

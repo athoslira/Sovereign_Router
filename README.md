@@ -31,6 +31,8 @@ To use Hermes, install and configure its API server separately, then set its HTT
 
 When Hermes performs terminal, subagent, cron, or local stdio MCP work, its own approval and security policies remain authoritative. Keep the Hermes API on loopback or behind authenticated HTTPS.
 
+For Hermes model aliases, the controlled approval flow for newly researched models, and the ownership boundary for skills and MCPs, see [Hermes model routing](docs/HERMES_MODEL_ROUTING.md).
+
 ## Sovereign control center
 
 Use **Sovereign Router: Open control center** from the command palette, or select **Control** in the chat header, to use Sovereign Router as the operational control plane.

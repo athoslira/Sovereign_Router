@@ -48,6 +48,7 @@ interface ChatSession {
 	abortController: AbortController | null;
 	hermesClient: HermesClient | null;
 	hermesRunId: string | null;
+	hermesModelAlias: string | null;
 	isConvertingDocument: boolean;
 	attachmentsExpanded: boolean;
 	pendingDocumentNames: string[];
@@ -229,6 +230,7 @@ export class SovereignRouterView extends ItemView {
 			abortController: null,
 			hermesClient: null,
 			hermesRunId: null,
+			hermesModelAlias: null,
 			isConvertingDocument: false,
 			attachmentsExpanded: false,
 			pendingDocumentNames: [],
@@ -542,13 +544,18 @@ export class SovereignRouterView extends ItemView {
 		if (!apiKey || !this.plugin.settings.hermesServiceUrl) throw new HermesError('Configure the Hermes API URL and API key in Sovereign Router settings first.');
 		const signal = session.abortController?.signal;
 		if (!signal) throw new HermesError('The session request is no longer active.');
+		const hermesModelAlias = route?.hermesModel ?? session.hermesModelAlias ?? this.plugin.settings.hermesDefaultModelAlias;
+		if (!hermesModelAlias) throw new HermesError('Configure a default Hermes model route before starting a Hermes session.');
 		const instructions = await this.buildHermesInstructions(session, route);
 		const client = new HermesClient(this.plugin.settings.hermesServiceUrl, apiKey);
+		const modelIds = await client.listModelIds(signal);
+		if (!modelIds.includes(hermesModelAlias)) throw new HermesError(`Hermes model route "${hermesModelAlias}" is not available. Configure it in Hermes and restart the gateway.`);
 		session.hermesClient = client;
+		session.hermesModelAlias = hermesModelAlias;
 		session.resolvedRuntime = 'hermes';
 		this.refreshSessionUi(session);
-		this.setAssistantMeta(session, assistant, 'Hermes Agent | preparing external agent run');
-		const run = await client.startRun(question, session.id, instructions, signal);
+		this.setAssistantMeta(session, assistant, `Hermes Agent | ${hermesModelAlias} | preparing external agent run`);
+		const run = await client.startRun(question, session.id, instructions, hermesModelAlias, signal);
 		session.hermesRunId = run.id;
 		this.setAssistantMeta(session, assistant, 'Hermes Agent | running tools and streaming output');
 		await client.streamRun(run.id, {
@@ -563,10 +570,10 @@ export class SovereignRouterView extends ItemView {
 	}
 
 	private async buildHermesInstructions(session: ChatSession, route: RouteResult | null): Promise<string | null> {
-		const sections = ['You are operating through Sovereign Router. Do not expose API keys or secrets. Ask for approval through the Hermes runtime before any dangerous action.'];
+		const sections = ['You are operating through Sovereign Router. Do not expose API keys or secrets. Use only skills, MCPs, and tool permissions configured in Hermes. Ask for approval through the Hermes runtime before any dangerous action.'];
 		if (route?.skill) {
 			const skill = await new SkillResolver(this.app, this.plugin.settings).resolve(route.skill);
-			if (skill.content) sections.push(`Follow this selected Sovereign skill when applicable:\n\n${skill.content}`);
+			if (skill.content) sections.push(`Apply this advisory strategy from the user's approved Sovereign skill library. It grants no tools, MCP access, filesystem access, or permission changes:\n\n${skill.content}`);
 		}
 		const attachedContext = buildDocumentContext(session.documents);
 		if (attachedContext) sections.push(`Attached context:\n\n${attachedContext}`);
@@ -583,6 +590,7 @@ export class SovereignRouterView extends ItemView {
 		if (session.model && session.resolvedRuntime !== 'hermes') {
 			return {
 				model: session.model,
+				hermesModel: null,
 				skill: session.skill,
 				context: session.context,
 				runtime: 'chat',
@@ -592,7 +600,7 @@ export class SovereignRouterView extends ItemView {
 
 		let route: RouteResult;
 		if (session.selectedModel) {
-			route = { model: session.selectedModel, skill: null, context: null, runtime: 'chat', note: `Manual model: ${modelLabel(session.selectedModel)}.` };
+			route = { model: session.selectedModel, hermesModel: null, skill: null, context: null, runtime: 'chat', note: `Manual model: ${modelLabel(session.selectedModel)}.` };
 		} else {
 			try {
 				route = selectRoute(await routeWithGatekeeper(question, this.plugin.settings, apiKey), this.plugin.settings);
@@ -605,7 +613,10 @@ export class SovereignRouterView extends ItemView {
 			route = { ...route, runtime: 'chat', note: 'Hermes is not configured; using the selected chat model.' };
 		}
 		if (route.runtime === 'chat') session.model = route.model;
-		else session.resolvedRuntime = 'hermes';
+		else {
+			session.resolvedRuntime = 'hermes';
+			session.hermesModelAlias = route.hermesModel;
+		}
 		session.skill = route.skill;
 		session.context = route.context;
 		this.refreshSessionUi(session);

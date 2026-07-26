@@ -4,6 +4,7 @@ import { isSecureOrLocalHttpEndpoint } from '../src/endpoint-policy';
 import { isSupportedDocument, isTextDocument, needsDoclingConversion } from '../src/document-files';
 import { contextTerms, extractContextExcerpt, rankContextEntries } from '../src/context-search';
 import { DEFAULT_EXECUTOR_MODELS, modelLabel } from '../src/models';
+import { formatHermesModelRoutes, parseHermesModelRoutes } from '../src/hermes-models';
 import { isCatalogFresh, normalizeOpenRouterModels } from '../src/model-catalog';
 import { parseMcpToolCalls, toExecutorTools } from '../src/mcp-tools';
 import { canCallMcpTool, isAllowedMcpEndpoint } from '../src/mcp-policy';
@@ -11,7 +12,7 @@ import { parseGatekeeperDecision, selectRoute } from '../src/routing';
 import { isAllowedGitHubRepository, isSafeRelativePath } from '../src/skill-policy';
 import { hermesProviderOverrideError } from '../src/hermes-policy';
 import { OperationalMetrics } from '../src/operational-metrics';
-import { normalizeHermesJobs, parseHermesRuntimeStatus } from '../src/hermes';
+import { normalizeHermesJobs, parseHermesModelIds, parseHermesRuntimeStatus } from '../src/hermes';
 import { SseParser } from '../src/sse';
 import type { SovereignRouterSettings } from '../src/settings';
 
@@ -32,6 +33,8 @@ const settings: SovereignRouterSettings = {
 	hermesServiceUrl: '',
 	hermesSecretName: '',
 	enableHermesAutoRouting: false,
+	hermesModelRoutes: [{ alias: 'sr-kimi-code', model: 'moonshotai/kimi-k2.7-code' }],
+	hermesDefaultModelAlias: 'sr-kimi-code',
 	hermesPermittedProviderOverrides: [],
 	mcpServers: [],
 };
@@ -48,9 +51,19 @@ run('validates permitted routes, context decisions, and fallback routes', () => 
 	assert.equal(parseGatekeeperDecision({ model: 'invalid' }), null);
 	const unpermitted = parseGatekeeperDecision({ model: 'untrusted/model', skill: null, context: null });
 	assert.equal(selectRoute(unpermitted, settings).model, settings.defaultExecutorModel);
-	const hermes = parseGatekeeperDecision({ model: settings.defaultExecutorModel, runtime: 'hermes', skill: null, context: null });
+	const hermes = parseGatekeeperDecision({ model: settings.defaultExecutorModel, runtime: 'hermes', hermes_model: 'sr-kimi-code', skill: { source: 'local', path: 'must-not-reach-hermes.md' }, context: null });
 	assert.equal(selectRoute(hermes, settings).runtime, 'chat');
 	assert.equal(selectRoute(hermes, { ...settings, enableHermesAutoRouting: true }).runtime, 'hermes');
+	assert.equal(selectRoute(hermes, { ...settings, enableHermesAutoRouting: true }).hermesModel, 'sr-kimi-code');
+	assert.deepEqual(selectRoute(hermes, { ...settings, enableHermesAutoRouting: true }).skill, { source: 'local', path: 'must-not-reach-hermes.md' });
+	const badHermesRoute = parseGatekeeperDecision({ model: settings.defaultExecutorModel, runtime: 'hermes', hermes_model: 'not-approved', skill: null, context: null });
+	assert.equal(selectRoute(badHermesRoute, { ...settings, enableHermesAutoRouting: true }).hermesModel, 'sr-kimi-code');
+});
+
+run('parses explicit Hermes model routes and rejects malformed aliases', () => {
+	const routes = parseHermesModelRoutes('sr-fast = provider/fast\ninvalid alias = provider/nope\nsr-reasoning=provider/reasoning');
+	assert.deepEqual(routes, [{ alias: 'sr-fast', model: 'provider/fast' }, { alias: 'sr-reasoning', model: 'provider/reasoning' }]);
+	assert.equal(formatHermesModelRoutes(routes), 'sr-fast = provider/fast\nsr-reasoning = provider/reasoning');
 });
 
 run('blocks unsafe skill paths and unapproved GitHub repositories', () => {
@@ -158,6 +171,10 @@ run('detects Hermes job support only from declared capabilities', () => {
 	assert.equal(parseHermesRuntimeStatus({ endpoints: { jobs: true } }, 'capabilities').jobsSupported, true);
 	assert.equal(parseHermesRuntimeStatus({ features: { session_jobs: false } }, 'capabilities').jobsSupported, false);
 	assert.equal(parseHermesRuntimeStatus({ data: [] }, 'models').jobsSupported, null);
+});
+
+run('parses only advertised Hermes model route aliases', () => {
+	assert.deepEqual(parseHermesModelIds({ data: [{ id: 'hermes-agent' }, { id: 'sr-fast' }, { id: 42 }] }), ['hermes-agent', 'sr-fast']);
 });
 
 run('enforces explicit Hermes provider override policy', () => {

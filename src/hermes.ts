@@ -48,8 +48,8 @@ export interface HermesCallbacks {
 	onStatus: (status: string) => void;
 }
 
-function allowedHermesUrl(value: string): boolean {
-	return isSecureOrLocalHttpEndpoint(value);
+interface HermesModelsResponse {
+	data?: Array<{ id?: unknown }>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -59,7 +59,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function displayValue(value: unknown): string {
 	if (typeof value === 'string' || typeof value === 'number') return String(value);
 	if (value && typeof value === 'object') {
-		try { return JSON.stringify(value); } catch (_error) { return 'Configured'; }
+		try { return JSON.stringify(value); } catch { return 'Configured'; }
 	}
 	return '';
 }
@@ -96,6 +96,12 @@ export function parseHermesRuntimeStatus(value: unknown, endpoint: HermesRuntime
 		if (result !== null) return { jobsSupported: result, endpoint };
 	}
 	return { jobsSupported: null, endpoint };
+}
+
+export function parseHermesModelIds(value: unknown): string[] {
+	const data = asRecord(value) as HermesModelsResponse | null;
+	if (!Array.isArray(data?.data)) return [];
+	return data.data.flatMap((entry) => typeof entry?.id === 'string' && entry.id.trim() ? [entry.id.trim()] : []);
 }
 
 /** Normalizes the small differences between Hermes API versions without exposing raw job prompts. */
@@ -169,7 +175,7 @@ export class HermesClient {
 	private readonly baseUrl: string;
 
 	constructor(baseUrl: string, private readonly apiKey: string) {
-		if (!allowedHermesUrl(baseUrl)) throw new HermesError('Hermes URL must use HTTPS, or HTTP only on localhost.');
+		if (!isSecureOrLocalHttpEndpoint(baseUrl)) throw new HermesError('Hermes URL must use HTTPS, or HTTP only on localhost.');
 		this.baseUrl = baseUrl.replace(/\/$/, '');
 	}
 
@@ -177,16 +183,22 @@ export class HermesClient {
 		return { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' };
 	}
 
-	async startRun(input: string, sessionId: string, instructions: string | null, signal: AbortSignal): Promise<HermesRun> {
+	async startRun(input: string, sessionId: string, instructions: string | null, model: string, signal: AbortSignal): Promise<HermesRun> {
 		const response = await fetch(`${this.baseUrl}/v1/runs`, {
 			method: 'POST', headers: this.headers(), signal,
-			body: JSON.stringify({ input, session_id: sessionId, ...(instructions ? { instructions } : {}) }),
+			body: JSON.stringify({ input, session_id: sessionId, model, ...(instructions ? { instructions } : {}) }),
 		});
 		if (!response.ok) throw await errorFromResponse(response);
 		const result = asRecord(await response.json());
 		const id = typeof result?.id === 'string' ? result.id : typeof result?.run_id === 'string' ? result.run_id : '';
 		if (!id) throw new HermesError('Hermes did not return a run identifier.');
 		return { id };
+	}
+
+	async listModelIds(signal?: AbortSignal): Promise<string[]> {
+		const response = await fetch(`${this.baseUrl}/v1/models`, { headers: this.headers(), signal });
+		if (!response.ok) throw await errorFromResponse(response);
+		return parseHermesModelIds(await response.json());
 	}
 
 	async streamRun(runId: string, callbacks: HermesCallbacks, signal: AbortSignal): Promise<void> {
