@@ -31,6 +31,8 @@ To use Hermes, install and configure its API server separately, then set its HTT
 
 When Hermes performs terminal, subagent, cron, or local stdio MCP work, its own approval and security policies remain authoritative. Keep the Hermes API on loopback or behind authenticated HTTPS.
 
+For a tested Windows setup, including API authentication, Obsidian CORS, validation, and the Hermes 0.19 streaming workaround, see [the Hermes Windows setup guide](docs/HERMES_WINDOWS_SETUP.md).
+
 ## Documents with Docling
 
 Docling is a Python project, so it is not bundled into this TypeScript/mobile plugin. Instead, Sovereign Router connects to an optional [docling-serve API](https://docling-project.github.io/docling/usage/api_server/) that converts an attached document into Markdown.
