@@ -13,6 +13,7 @@ import { isAllowedGitHubRepository, isSafeRelativePath } from '../src/skill-poli
 import { hermesProviderOverrideError } from '../src/hermes-policy';
 import { OperationalMetrics } from '../src/operational-metrics';
 import { normalizeHermesJobs, parseHermesModelIds, parseHermesRuntimeStatus } from '../src/hermes';
+import { formatContextPackage, parseMemoryCandidates, selectMemoriesForContext, summarizeSession, type LocalMemory } from '../src/local-context';
 import { SseParser } from '../src/sse';
 import type { SovereignRouterSettings } from '../src/settings';
 
@@ -36,6 +37,9 @@ const settings: SovereignRouterSettings = {
 	hermesModelRoutes: [{ alias: 'sr-kimi-code', model: 'moonshotai/kimi-k2.7-code' }],
 	hermesDefaultModelAlias: 'sr-kimi-code',
 	hermesPermittedProviderOverrides: [],
+	graphifyGraphPath: '.sovereign-router/graphify-out/graph.json',
+	localContextSummaryBudget: 6_000,
+	localContextMemoryBudget: 4_000,
 	mcpServers: [],
 };
 
@@ -190,4 +194,30 @@ run('keeps local FinOps totals only in memory and avoids duplicate usage events'
 	metrics.recordDirectResponseCost(0.012, 0.015);
 	metrics.recordDirectResponseCost(0.015, 0.015);
 	assert.deepEqual(metrics.snapshot(), { directResponses: 1, directCostUsd: 0.015 });
+});
+
+run('builds bounded local summaries and retrieves only relevant approved memories', () => {
+	const summary = summarizeSession([
+		{ role: 'user', content: 'Precisamos manter a decisao de usar Graphify local.' },
+		{ role: 'assistant', content: 'A decisao foi registrada com fonte no vault.' },
+	], 180);
+	assert.match(summary.content, /Graphify/);
+	assert.ok(summary.content.length <= 180);
+	const memories: LocalMemory[] = [
+		{ id: 'm-graph', kind: 'decision', statement: 'Usar Graphify local como indice do vault.', entityIds: ['graphify'], sourceRefs: [{ type: 'vault_file', id: 'vault:architecture', path: 'Architecture.md' }], confidence: 0.9, rationale: 'Approved.', createdAt: '2026-07-27T00:00:00.000Z', updatedAt: '2026-07-27T00:00:00.000Z', approvedAt: '2026-07-27T00:00:00.000Z', status: 'active', supersedes: [] },
+		{ id: 'm-other', kind: 'preference', statement: 'Use a blue theme for dashboards.', entityIds: ['theme'], sourceRefs: [{ type: 'session', id: 'session-1' }], confidence: 0.8, rationale: 'Approved.', createdAt: '2026-07-27T00:00:00.000Z', updatedAt: '2026-07-27T00:00:00.000Z', approvedAt: '2026-07-27T00:00:00.000Z', status: 'active', supersedes: [] },
+	];
+	assert.deepEqual(selectMemoriesForContext(memories, 'Como consultar o Graphify?', 1).map((memory) => memory.id), ['m-graph']);
+	const context = formatContextPackage({ summary, memories: [memories[0]!], graph: { state: 'ready', path: '.sovereign-router/graphify-out/graph.json' } });
+	assert.ok(context);
+	assert.match(context, /Approved memory/);
+});
+
+run('accepts only structured, source-backed Hermes memory candidates', () => {
+	const sourceRefs = [{ type: 'session' as const, id: 'session-1' }];
+	const candidates = parseMemoryCandidates('```json\n[{"kind":"decision","statement":"Keep memories local.","confidence":0.9,"rationale":"User approved it."}]\n```', sourceRefs, '2026-07-27T00:00:00.000Z');
+	assert.equal(candidates.length, 1);
+	assert.deepEqual(candidates[0]?.sourceRefs, sourceRefs);
+	assert.equal(parseMemoryCandidates('[{"kind":"decision","statement":"No source","sourceRefs":[]}]', [], '2026-07-27T00:00:00.000Z').length, 0);
+	assert.equal(parseMemoryCandidates('not json', sourceRefs, '2026-07-27T00:00:00.000Z').length, 0);
 });

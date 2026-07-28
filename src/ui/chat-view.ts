@@ -15,6 +15,9 @@ import type { ChatMessage, OpenRouterToolCall, RouteResult, SessionRuntime, Skil
 import { confirmMcpToolCall } from './tool-confirmation-modal';
 import { openControlCenter } from './control-center-modal';
 import { VaultFolderPicker } from './vault-folder-picker';
+import { GraphifyContext } from '../graphify-context';
+import { parseMemoryCandidates, type PersistedSession } from '../local-context';
+import { confirmMemoryProposal, MemoryReviewModal } from './memory-review-modal';
 
 export const VIEW_TYPE_SOVEREIGN_ROUTER = 'sovereign-router-chat';
 
@@ -53,6 +56,9 @@ interface ChatSession {
 	attachmentsExpanded: boolean;
 	pendingDocumentNames: string[];
 	attachmentError: string | null;
+	state: 'active' | 'ended';
+	createdAt: string;
+	updatedAt: string;
 }
 
 function formatError(error: unknown): string {
@@ -84,6 +90,7 @@ function formatUsage(model: string, usage?: Usage, suffix?: string): string {
 export class SovereignRouterView extends ItemView {
 	private readonly sessions = new Map<string, ChatSession>();
 	private readonly sessionOrder: string[] = [];
+	private readonly persistTimers = new Map<string, number>();
 	private activeSessionId = '';
 	private nextSessionNumber = 1;
 	private messagesEl!: HTMLElement;
@@ -101,6 +108,7 @@ export class SovereignRouterView extends ItemView {
 	private cancelButton!: HTMLButtonElement;
 	private newSessionButton!: HTMLButtonElement;
 	private endSessionButton!: HTMLButtonElement;
+	private memoryButton!: HTMLButtonElement;
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: SovereignRouterPlugin) {
 		super(leaf);
@@ -143,6 +151,7 @@ export class SovereignRouterView extends ItemView {
 		const sessionActions = sessionBar.createDiv({ cls: 'sr-session-actions' });
 		this.newSessionButton = sessionActions.createEl('button', { text: 'New session', cls: 'sr-session-button' });
 		this.endSessionButton = sessionActions.createEl('button', { text: 'End session', cls: 'sr-session-button' });
+		this.memoryButton = sessionActions.createEl('button', { text: 'Propose memory', cls: 'sr-session-button' });
 		this.sessionStatusEl = this.containerEl.createDiv({ cls: 'sr-session-status' });
 
 		this.messagesEl = this.containerEl.createDiv({ cls: 'sr-messages' });
@@ -182,24 +191,31 @@ export class SovereignRouterView extends ItemView {
 		this.registerDomEvent(this.modelSelect, 'change', () => {
 			const session = this.activeSession;
 			if (!session.model) session.selectedModel = this.modelSelect.value;
+			void this.persistSession(session);
 		});
 		this.registerDomEvent(controlCenterButton, 'click', () => openControlCenter(this.app, this.plugin));
 		this.registerDomEvent(this.runtimeSelect, 'change', () => {
 			const session = this.activeSession;
 			if (!session.resolvedRuntime) session.runtime = this.runtimeSelect.value as SessionRuntime;
+			void this.persistSession(session);
 			this.refreshSessionUi(session);
 		});
 		this.registerDomEvent(this.mcpToggle, 'change', () => {
 			const session = this.activeSession;
 			session.useMcp = this.mcpToggle.checked;
+			void this.persistSession(session);
 		});
 		this.registerDomEvent(this.newSessionButton, 'click', () => this.createSession());
 		this.registerDomEvent(this.endSessionButton, 'click', () => void this.endActiveSession());
+		this.registerDomEvent(this.memoryButton, 'click', () => void this.proposeMemory(this.activeSession));
 
-		this.createSession();
+		await this.restoreSessions();
 	}
 
 	async onClose(): Promise<void> {
+		for (const timer of this.persistTimers.values()) window.clearTimeout(timer);
+		this.persistTimers.clear();
+		await Promise.all([...this.sessions.values()].map((session) => this.persistSession(session)));
 		for (const session of this.sessions.values()) void this.cancelRequest(session);
 		this.sessions.clear();
 		this.sessionOrder.length = 0;
@@ -235,10 +251,27 @@ export class SovereignRouterView extends ItemView {
 			attachmentsExpanded: false,
 			pendingDocumentNames: [],
 			attachmentError: null,
+			state: 'active',
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
 		};
 		this.sessions.set(id, session);
 		this.sessionOrder.push(id);
 		void this.activateSession(id);
+		void this.persistSession(session);
+	}
+
+	private async restoreSessions(): Promise<void> {
+		const persisted = await this.plugin.localContext.listSessions();
+		for (const record of persisted) {
+			const session = this.fromPersistedSession(record);
+			this.sessions.set(session.id, session);
+			this.sessionOrder.push(session.id);
+			this.nextSessionNumber = Math.max(this.nextSessionNumber, session.number + 1);
+		}
+		const active = [...this.sessionOrder].reverse().find((id) => this.sessions.get(id)?.state === 'active');
+		if (active) await this.activateSession(active);
+		else this.createSession();
 	}
 
 	private async activateSession(id: string): Promise<void> {
@@ -259,9 +292,10 @@ export class SovereignRouterView extends ItemView {
 		const session = this.activeSession;
 		if (session.abortController || session.isConvertingDocument) return;
 		const index = this.sessionOrder.indexOf(session.id);
-		this.sessions.delete(session.id);
-		this.sessionOrder.splice(index, 1);
-		const nextSessionId = this.sessionOrder[index] ?? this.sessionOrder[index - 1];
+		session.state = 'ended';
+		session.updatedAt = new Date().toISOString();
+		await this.persistSession(session);
+		const nextSessionId = this.sessionOrder.slice(index + 1).find((id) => this.sessions.get(id)?.state === 'active') ?? this.sessionOrder.slice(0, index).reverse().find((id) => this.sessions.get(id)?.state === 'active');
 		if (nextSessionId) await this.activateSession(nextSessionId);
 		else this.createSession();
 	}
@@ -281,6 +315,10 @@ export class SovereignRouterView extends ItemView {
 			this.registerDomEvent(button, 'click', () => void this.activateSession(session.id));
 		}
 		const session = this.activeSession;
+		if (session.state === 'ended') {
+			this.sessionStatusEl.setText('Ended session · preserved locally and read-only.');
+			return;
+		}
 		if (session.resolvedRuntime === 'hermes') {
 			this.sessionStatusEl.setText('Active session · Hermes Agent is handling this task outside Obsidian.');
 			return;
@@ -295,7 +333,7 @@ export class SovereignRouterView extends ItemView {
 	}
 
 	private canInteract(session: ChatSession): boolean {
-		return !session.abortController && !session.isConvertingDocument;
+		return session.state === 'active' && !session.abortController && !session.isConvertingDocument;
 	}
 
 	private openFolderPicker(): void {
@@ -445,6 +483,7 @@ export class SovereignRouterView extends ItemView {
 
 		this.inputEl.value = '';
 		this.appendUser(session, question);
+		this.schedulePersist(session);
 		session.history.push({ role: 'user', content: question });
 		const assistant = this.appendAssistant(session);
 		session.abortController = new AbortController();
@@ -482,7 +521,8 @@ export class SovereignRouterView extends ItemView {
 					this.setAssistantMeta(session, assistant, 'Local context is unavailable; continuing without it.');
 				}
 			}
-			const documentContext = [attachedContext, vaultContext].filter((value): value is string => Boolean(value)).join('\n\n---\n\n') || null;
+			const localContext = await this.localContextFor(session, question);
+			const documentContext = [attachedContext, vaultContext, localContext].filter((value): value is string => Boolean(value)).join('\n\n---\n\n') || null;
 			catalog = session.useMcp ? await this.loadMcpCatalog() : null;
 			const executorTools = catalog ? toExecutorTools(catalog.tools) : [];
 			if (catalog?.warnings.length) new Notice(catalog.warnings.join(' '));
@@ -523,6 +563,7 @@ export class SovereignRouterView extends ItemView {
 			session.hermesRunId = null;
 			session.hermesClient = null;
 			this.refreshSessionUi(session);
+			await this.persistSession(session);
 			if (this.isActive(session)) this.scrollToBottom();
 		}
 	}
@@ -546,7 +587,7 @@ export class SovereignRouterView extends ItemView {
 		if (!signal) throw new HermesError('The session request is no longer active.');
 		const hermesModelAlias = route?.hermesModel ?? session.hermesModelAlias ?? this.plugin.settings.hermesDefaultModelAlias;
 		if (!hermesModelAlias) throw new HermesError('Configure a default Hermes model route before starting a Hermes session.');
-		const instructions = await this.buildHermesInstructions(session, route);
+		const instructions = await this.buildHermesInstructions(session, route, question);
 		const client = new HermesClient(this.plugin.settings.hermesServiceUrl, apiKey);
 		const modelIds = await client.listModelIds(signal);
 		if (!modelIds.includes(hermesModelAlias)) throw new HermesError(`Hermes model route "${hermesModelAlias}" is not available. Configure it in Hermes and restart the gateway.`);
@@ -569,7 +610,7 @@ export class SovereignRouterView extends ItemView {
 		if (this.isActive(session) && assistant.bodyEl?.isConnected) await this.renderMarkdown(assistant.bodyEl, assistant.message.content);
 	}
 
-	private async buildHermesInstructions(session: ChatSession, route: RouteResult | null): Promise<string | null> {
+	private async buildHermesInstructions(session: ChatSession, route: RouteResult | null, question: string): Promise<string | null> {
 		const sections = ['You are operating through Sovereign Router. Do not expose API keys or secrets. Use only skills, MCPs, and tool permissions configured in Hermes. Ask for approval through the Hermes runtime before any dangerous action.'];
 		if (route?.skill) {
 			const skill = await new SkillResolver(this.app, this.plugin.settings).resolve(route.skill);
@@ -583,7 +624,53 @@ export class SovereignRouterView extends ItemView {
 				if (resolved.content) sections.push(`Relevant vault context:\n\n${resolved.content}`);
 			} catch { /* Hermes can continue without vault context. */ }
 		}
+		const localContext = await this.localContextFor(session, question);
+		if (localContext) sections.push(`Local persistent context:\n\n${localContext}`);
 		return sections.join('\n\n');
+	}
+
+	private async localContextFor(session: ChatSession, question: string): Promise<string | null> {
+		const graph = await new GraphifyContext(this.app, this.plugin.settings.graphifyGraphPath).getStatus();
+		return this.plugin.localContext.buildContext(
+			this.toPersistedSession(session),
+			question,
+			graph,
+			this.plugin.settings.localContextSummaryBudget,
+			this.plugin.settings.localContextMemoryBudget,
+		);
+	}
+
+	private async proposeMemory(session: ChatSession): Promise<void> {
+		if (!this.canInteract(session)) return;
+		if (!this.hasHermesCredentials()) { new Notice('Configure Hermes before requesting a memory proposal.'); return; }
+		if (!await confirmMemoryProposal(this.app)) return;
+		const secretName = this.plugin.settings.hermesSecretName;
+		const apiKey = secretName ? this.app.secretStorage.getSecret(secretName) : null;
+		const alias = session.hermesModelAlias ?? this.plugin.settings.hermesDefaultModelAlias;
+		if (!apiKey || !alias) { new Notice('Configure an approved Hermes model route before requesting a memory proposal.'); return; }
+		try {
+			session.abortController = new AbortController();
+			this.refreshSessionUi(session);
+			const client = new HermesClient(this.plugin.settings.hermesServiceUrl, apiKey);
+			if (!(await client.listModelIds()).includes(alias)) throw new HermesError(`Hermes model route "${alias}" is not available.`);
+			const context = await this.localContextFor(session, 'session decisions entities relationships preferences');
+			const instructions = `${context ?? ''}\n\nReturn only a JSON array. Each item must contain kind (decision, entity, relation, preference, or project_state), statement, entityIds, confidence from 0 to 1, rationale, and sourceRefs when known. Propose only durable facts supported by the supplied local context. Do not execute tools or make changes.`;
+			session.hermesClient = client;
+			const run = await client.startRun('Propose concise local memory candidates for this completed session.', `${session.id}-memory-${Date.now()}`, instructions, alias, session.abortController.signal);
+			session.hermesRunId = run.id;
+			let response = '';
+			await client.streamRun(run.id, { onDelta: (text) => { response += text; }, onStatus: () => undefined }, session.abortController.signal);
+			const candidates = parseMemoryCandidates(response, [{ type: 'session', id: session.id }]);
+			if (!candidates.length) { new Notice('Hermes returned no valid, source-backed memory candidates.'); return; }
+			for (const candidate of candidates) await this.plugin.localContext.saveCandidate(candidate);
+			new MemoryReviewModal(this.app, this.plugin.localContext).open();
+		} catch (error) { new Notice(formatError(error)); }
+		finally {
+			session.abortController = null;
+			session.hermesClient = null;
+			session.hermesRunId = null;
+			this.refreshSessionUi(session);
+		}
 	}
 
 	private async routeForSession(session: ChatSession, question: string, apiKey: string): Promise<RouteResult> {
@@ -792,6 +879,7 @@ export class SovereignRouterView extends ItemView {
 	private appendAssistant(session: ChatSession): AssistantElements {
 		const message: SessionDisplayMessage = { role: 'assistant', content: '', meta: 'Preparing request...' };
 		session.messages.push(message);
+		this.schedulePersist(session);
 		if (!this.isActive(session)) return { message, bodyEl: null, metaEl: null };
 		const elements = this.createMessageElement(message);
 		return { message, bodyEl: elements.bodyEl, metaEl: elements.metaEl };
@@ -806,6 +894,7 @@ export class SovereignRouterView extends ItemView {
 
 	private setAssistantContent(session: ChatSession, assistant: AssistantElements, content: string): void {
 		assistant.message.content = content;
+		this.schedulePersist(session);
 		if (this.isActive(session) && assistant.bodyEl?.isConnected) assistant.bodyEl.setText(content);
 	}
 
@@ -847,12 +936,48 @@ export class SovereignRouterView extends ItemView {
 		this.modelSelect.disabled = controlsDisabled || Boolean(session.model) || session.resolvedRuntime === 'hermes' || session.runtime === 'hermes';
 		this.runtimeSelect.disabled = controlsDisabled || Boolean(session.model) || Boolean(session.resolvedRuntime);
 		this.mcpToggle.disabled = controlsDisabled || session.resolvedRuntime === 'hermes' || session.runtime === 'hermes';
-		this.endSessionButton.disabled = Boolean(session.abortController) || session.isConvertingDocument;
+		this.endSessionButton.disabled = controlsDisabled;
+		this.memoryButton.disabled = controlsDisabled;
 	}
 
 	private scrollToBottom(): void {
 		window.setTimeout(() => {
 			this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
 		}, 0);
+	}
+
+	private async persistSession(session: ChatSession): Promise<void> {
+		if (!session.id) return;
+		session.updatedAt = new Date().toISOString();
+		try { await this.plugin.localContext.saveSession(this.toPersistedSession(session), this.plugin.settings.localContextSummaryBudget); }
+		catch { /* Local context is optional; chat remains usable if the vault adapter is unavailable. */ }
+	}
+
+	private schedulePersist(session: ChatSession): void {
+		const existing = this.persistTimers.get(session.id);
+		if (existing !== undefined) window.clearTimeout(existing);
+		this.persistTimers.set(session.id, window.setTimeout(() => {
+			this.persistTimers.delete(session.id);
+			void this.persistSession(session);
+		}, 500));
+	}
+
+	private toPersistedSession(session: ChatSession): PersistedSession {
+		return {
+			version: 1, id: session.id, number: session.number, state: session.state, createdAt: session.createdAt, updatedAt: session.updatedAt,
+			selectedModel: session.selectedModel, runtime: session.runtime, resolvedRuntime: session.resolvedRuntime, model: session.model,
+			hermesModelAlias: session.hermesModelAlias, skill: session.skill, context: session.context, useMcp: session.useMcp,
+			messages: session.messages.map((message) => ({ role: message.role, content: message.content, ...(message.meta ? { meta: message.meta } : {}) })),
+		};
+	}
+
+	private fromPersistedSession(record: PersistedSession): ChatSession {
+		return {
+			...record,
+			history: record.messages.map((message) => ({ role: message.role, content: message.content })),
+			messages: record.messages.map((message) => ({ ...message })),
+			documents: [], abortController: null, hermesClient: null, hermesRunId: null,
+			isConvertingDocument: false, attachmentsExpanded: false, pendingDocumentNames: [], attachmentError: null,
+		};
 	}
 }

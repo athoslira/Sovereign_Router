@@ -26,6 +26,9 @@ export interface SovereignRouterSettings {
 	hermesModelRoutes: HermesModelRoute[];
 	hermesDefaultModelAlias: string;
 	hermesPermittedProviderOverrides: string[];
+	graphifyGraphPath: string;
+	localContextSummaryBudget: number;
+	localContextMemoryBudget: number;
 	mcpServers: McpServerConfig[];
 }
 
@@ -49,6 +52,9 @@ export const DEFAULT_SETTINGS: SovereignRouterSettings = {
 	hermesModelRoutes: DEFAULT_HERMES_MODEL_ROUTES,
 	hermesDefaultModelAlias: DEFAULT_HERMES_MODEL_ALIAS,
 	hermesPermittedProviderOverrides: [],
+	graphifyGraphPath: '.sovereign-router/graphify-out/graph.json',
+	localContextSummaryBudget: 6_000,
+	localContextMemoryBudget: 4_000,
 	mcpServers: [],
 };
 
@@ -60,7 +66,7 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('p', { text: 'Sovereign chat messages and selected skills are sent to OpenRouter. Hermes sessions use models, native skills, and MCPs configured in Hermes; a selected Sovereign skill may be supplied as read-only strategy text. Attached documents are sent to the configured Docling service. No conversation or document is saved by this plugin.' });
+		containerEl.createEl('p', { text: 'Sovereign chat messages and selected skills are sent to OpenRouter. Hermes sessions use models, native skills, and MCPs configured in Hermes; a selected Sovereign skill may be supplied as read-only strategy text. Attached documents are sent to the configured Docling service. Sessions, summaries, and approved memories are stored only in this vault.' });
 		new Setting(containerEl).setName('OpenRouter API key').setDesc('Choose or create a secret. The plugin stores only its reference in data.json.').addComponent((component) => {
 			const secretComponent = new SecretComponent(this.app, component).setValue(this.plugin.settings.openRouterSecretName);
 			secretComponent.onChange(async (value) => {
@@ -127,6 +133,11 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName('Clear stored external documents').setDesc('Deletes only the converted document cache. Vault files remain in the local index and are always read from their current vault version.').addButton((button) => button.setWarning().setButtonText('Clear cache').onClick(async () => {
 			await this.plugin.contextIndex.clearExternalDocuments();
 		}));
+		new Setting(containerEl).setName('Local context graph').setHeading();
+		containerEl.createEl('p', { text: 'Optional. Generate this graph locally with Graphify through Hermes. The plugin only checks for the generated file; it never runs Graphify, a terminal, or an MCP server.' });
+		this.addTextSetting('Graphify graph path', 'Vault-relative path to Graphify graph.json. Hermes must be able to access its own configured graph path before it can query the graph.', this.plugin.settings.graphifyGraphPath, async (value) => { this.plugin.settings.graphifyGraphPath = value.replace(/^[/\\]+/, ''); });
+		this.addTextSetting('Session summary budget (characters)', 'Maximum local session summary supplied as context.', String(this.plugin.settings.localContextSummaryBudget), async (value) => { this.plugin.settings.localContextSummaryBudget = positiveInteger(value, 6_000); });
+		this.addTextSetting('Approved memory budget (characters)', 'Maximum approved-memory context supplied per request.', String(this.plugin.settings.localContextMemoryBudget), async (value) => { this.plugin.settings.localContextMemoryBudget = positiveInteger(value, 4_000); });
 		new Setting(containerEl).setName('MCP connections').setHeading();
 		containerEl.createEl('p', { text: 'Connect remote MCP servers over Streamable HTTP. Read-only tools can be used in chat. Write tools stay disabled until you explicitly enable them and confirm each call.' });
 		new Setting(containerEl).setName('Add MCP connection').setDesc('Use HTTPS. HTTP is accepted only for localhost.').addButton((button) => button.setButtonText('Add connection').onClick(async () => {
@@ -183,3 +194,5 @@ function createMcpServer(): McpServerConfig {
 		allowWriteTools: false,
 	};
 }
+
+function positiveInteger(value: string, fallback: number): number { const parsed = Number.parseInt(value, 10); return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback; }

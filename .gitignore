@@ -19,6 +19,9 @@ main.js
 # obsidian
 data.json
 /context/
+/.obsidian/plugins/sovereign-router/context/
+/.sovereign-router/
+graphify-out/
 
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store

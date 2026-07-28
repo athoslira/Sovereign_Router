@@ -68,6 +68,12 @@ When the Gatekeeper identifies that a request needs vault information, it return
 
 External documents attached through Docling are cached as converted Markdown in that same local context library. Use **Settings → Sovereign Router → Clear stored external documents** to remove that cache. Existing PDFs and Office documents already in the vault are not converted automatically; attach them through Docling when needed.
 
+## Local session memory and Graphify
+
+Sessions, compact summaries, pending Hermes proposals, approved memories, and deletion tombstones are stored only under the active vault's plugin data directory. Ending a session makes it read-only without deleting it; no memory is accepted until you explicitly approve or edit it in **Propose memory**. Attached document bodies and API keys are not written into session records.
+
+Graphify remains an optional local Hermes skill. Generate its `graph.json` separately, then set the vault-relative path in **Settings → Sovereign Router → Local context graph**. Sovereign Router only detects that generated file and tells Hermes it is available; it never starts Graphify, Python, a terminal, or an MCP server. If no graph exists, local session summaries and approved memories continue to work.
+
 ## MCP tools
 
 Sovereign Router can call tools from remote MCP servers through Streamable HTTP. In **Settings → Sovereign Router → MCP connections**, add an endpoint, optional SecretStorage key, and enable it. On the chat panel, select **MCP** only for messages where those tools may be useful.
@@ -82,7 +88,7 @@ Sovereign Router can call tools from remote MCP servers through Streamable HTTP.
 - The plugin sends chat messages and selected skill content to OpenRouter when you submit a request.
 - Attached files are sent only to the Docling service URL you configure; their converted Markdown is then sent to OpenRouter with the chat request.
 - API keys are selected through Obsidian SecretStorage. `data.json` stores only their references.
-- Conversations remain only in the open chat panel. The local context index persists file references and search terms; converted external attachments persist only in the local plugin cache until you clear them. The plugin collects no telemetry, edits no notes, and executes no remote code.
+- Conversations, summaries, and approved memories remain in the current vault's local plugin data. The local context index persists file references and search terms; converted external attachments persist only in the local plugin cache until you clear them. The plugin collects no telemetry, edits no notes, and executes no remote code.
 - Remote skills are fetched as Markdown only from GitHub repositories you explicitly allow. They are never executed or saved to the vault.
 - MCP servers receive only the arguments of a tool call that you enabled in the chat. Their tools can be selected by OpenRouter only after their schemas have been loaded for that request.
 - Hermes receives the prompt and any context selected for a Hermes session. It is an optional external runtime and is configured only when you choose to use it.

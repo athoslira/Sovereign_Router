@@ -12,6 +12,9 @@
 .sr-session-actions { display: grid; flex: 0 0 220px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .sr-session-button, .sr-session-tab { min-width: 0; white-space: nowrap; }
 .sr-session-button { width: 100%; }
+.sr-memory-candidate { border-top: 1px solid var(--background-modifier-border); margin-top: 12px; padding-top: 12px; }
+.sr-memory-candidate textarea { box-sizing: border-box; min-height: 72px; width: 100%; }
+.sr-memory-actions { display: flex; gap: 8px; margin-top: 8px; }
 .sr-session-tab { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
 .sr-session-tab.is-active { background: var(--interactive-accent); color: var(--text-on-accent); }
 .sr-session-status { padding: 0 12px 8px; color: var(--text-muted); font-size: var(--font-ui-smaller); }

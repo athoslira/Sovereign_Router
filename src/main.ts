@@ -7,21 +7,29 @@ import { OperationalMetrics } from './operational-metrics';
 import { SovereignRouterView, VIEW_TYPE_SOVEREIGN_ROUTER } from './ui/chat-view';
 import { openControlCenter } from './ui/control-center-modal';
 import { VaultContextIndex } from './vault-context-index';
+import { LocalContextStore } from './local-context-store';
 
 export default class SovereignRouterPlugin extends Plugin {
 	settings!: SovereignRouterSettings;
 	contextIndex!: VaultContextIndex;
+	localContext!: LocalContextStore;
 	readonly operationalMetrics = new OperationalMetrics();
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.contextIndex = new VaultContextIndex(this.app, this.manifest);
+		this.localContext = new LocalContextStore(this.app, this.manifest);
+		try {
+			await this.localContext.start();
+		} catch {
+			new Notice('Local context storage is unavailable. Chat remains available, but sessions will not persist.');
+		}
 		this.app.workspace.onLayoutReady(() => {
 			void this.contextIndex.start();
 			this.registerEvent(this.app.vault.on('create', (file) => this.contextIndex.onVaultFileChanged(file)));
 			this.registerEvent(this.app.vault.on('modify', (file) => this.contextIndex.onVaultFileChanged(file)));
-			this.registerEvent(this.app.vault.on('delete', (file) => this.contextIndex.onVaultFileDeleted(file)));
-			this.registerEvent(this.app.vault.on('rename', (file, oldPath) => this.contextIndex.onVaultFileRenamed(file, oldPath)));
+			this.registerEvent(this.app.vault.on('delete', (file) => { this.contextIndex.onVaultFileDeleted(file); void this.localContext.markVaultSourceNeedsReview(file.path); }));
+			this.registerEvent(this.app.vault.on('rename', (file, oldPath) => { this.contextIndex.onVaultFileRenamed(file, oldPath); void this.localContext.markVaultSourceNeedsReview(oldPath); }));
 		});
 
 		this.registerView(
@@ -73,6 +81,9 @@ export default class SovereignRouterPlugin extends Plugin {
 		this.settings.hermesModelRoutes = this.settings.hermesModelRoutes?.length ? this.settings.hermesModelRoutes : DEFAULT_HERMES_MODEL_ROUTES.map((route) => ({ ...route }));
 		this.settings.hermesDefaultModelAlias = this.settings.hermesDefaultModelAlias ?? DEFAULT_HERMES_MODEL_ALIAS;
 		this.settings.hermesPermittedProviderOverrides = this.settings.hermesPermittedProviderOverrides ?? [];
+		this.settings.graphifyGraphPath = this.settings.graphifyGraphPath ?? '.sovereign-router/graphify-out/graph.json';
+		this.settings.localContextSummaryBudget = Math.max(1_000, this.settings.localContextSummaryBudget ?? 6_000);
+		this.settings.localContextMemoryBudget = Math.max(1_000, this.settings.localContextMemoryBudget ?? 4_000);
 	}
 
 	async saveSettings(): Promise<void> {
