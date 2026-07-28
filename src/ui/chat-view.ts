@@ -18,6 +18,9 @@ import { VaultFolderPicker } from './vault-folder-picker';
 import { GraphifyContext } from '../graphify-context';
 import { parseMemoryCandidates, type PersistedSession } from '../local-context';
 import { confirmMemoryProposal, MemoryReviewModal } from './memory-review-modal';
+import { extractRequestedSkill } from '../requested-skill';
+import { documentAuthoringInstruction, isDocumentRequest, parseDocumentOperation, stripDocumentOperation } from '../document-authoring';
+import { VaultDocumentWriter } from '../vault-document-writer';
 
 export const VIEW_TYPE_SOVEREIGN_ROUTER = 'sovereign-router-chat';
 
@@ -59,6 +62,7 @@ interface ChatSession {
 	state: 'active' | 'ended';
 	createdAt: string;
 	updatedAt: string;
+	requestedSkill: string | null;
 }
 
 function formatError(error: unknown): string {
@@ -254,6 +258,7 @@ export class SovereignRouterView extends ItemView {
 			state: 'active',
 			createdAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString(),
+			requestedSkill: null,
 		};
 		this.sessions.set(id, session);
 		this.sessionOrder.push(id);
@@ -316,15 +321,15 @@ export class SovereignRouterView extends ItemView {
 		}
 		const session = this.activeSession;
 		if (session.state === 'ended') {
-			this.sessionStatusEl.setText('Ended session · preserved locally and read-only.');
+			this.sessionStatusEl.setText(`Ended session · preserved locally at ${new Date(session.updatedAt).toLocaleTimeString()} and read-only.`);
 			return;
 		}
 		if (session.resolvedRuntime === 'hermes') {
-			this.sessionStatusEl.setText('Active session · Hermes Agent is handling this task outside Obsidian.');
+			this.sessionStatusEl.setText(`Active session · Hermes Agent is handling this task outside Obsidian. Local context saved ${new Date(session.updatedAt).toLocaleTimeString()}.`);
 			return;
 		}
 		this.sessionStatusEl.setText(session.model
-			? `Active session · ${modelLabel(session.model)} is locked for this task.`
+			? `Active session · ${modelLabel(session.model)} is locked for this task. Local context saved ${new Date(session.updatedAt).toLocaleTimeString()}.`
 			: 'New session · choose a model or use automatic routing for the first message.');
 	}
 
@@ -496,6 +501,7 @@ export class SovereignRouterView extends ItemView {
 					assistantText += text;
 					this.setAssistantContent(session, assistant, assistantText);
 				});
+				await this.applyDocumentOperation(session, question, assistant);
 				return;
 			}
 			if (!apiKey) throw new OpenRouterError('OpenRouter API key is unavailable.');
@@ -505,6 +511,7 @@ export class SovereignRouterView extends ItemView {
 					assistantText += text;
 					this.setAssistantContent(session, assistant, assistantText);
 				});
+				await this.applyDocumentOperation(session, question, assistant);
 				return;
 			}
 			this.setAssistantMeta(session, assistant, route.note || `Using ${modelLabel(route.model)} for this session.`);
@@ -522,7 +529,8 @@ export class SovereignRouterView extends ItemView {
 				}
 			}
 			const localContext = await this.localContextFor(session, question);
-			const documentContext = [attachedContext, vaultContext, localContext].filter((value): value is string => Boolean(value)).join('\n\n---\n\n') || null;
+			const authoringInstruction = this.plugin.settings.automaticDocumentAuthoring && isDocumentRequest(question) ? documentAuthoringInstruction() : null;
+			const documentContext = [attachedContext, vaultContext, localContext, authoringInstruction].filter((value): value is string => Boolean(value)).join('\n\n---\n\n') || null;
 			catalog = session.useMcp ? await this.loadMcpCatalog() : null;
 			const executorTools = catalog ? toExecutorTools(catalog.tools) : [];
 			if (catalog?.warnings.length) new Notice(catalog.warnings.join(' '));
@@ -546,6 +554,8 @@ export class SovereignRouterView extends ItemView {
 				assistantText = '';
 				this.setAssistantContent(session, assistant, '');
 			});
+			await this.applyDocumentOperation(session, question, assistant);
+			assistantText = assistant.message.content;
 			if (this.isActive(session) && assistant.bodyEl?.isConnected) await this.renderMarkdown(assistant.bodyEl, assistantText);
 		} catch (error) {
 			const message = formatError(error);
@@ -616,6 +626,7 @@ export class SovereignRouterView extends ItemView {
 			const skill = await new SkillResolver(this.app, this.plugin.settings).resolve(route.skill);
 			if (skill.content) sections.push(`Apply this advisory strategy from the user's approved Sovereign skill library. It grants no tools, MCP access, filesystem access, or permission changes:\n\n${skill.content}`);
 		}
+		if (session.requestedSkill) sections.push(`The user explicitly requested the Hermes skill "${session.requestedSkill}". Use it only if it is installed in Hermes; otherwise state that it is unavailable. This request grants no additional tools or permissions.`);
 		const attachedContext = buildDocumentContext(session.documents);
 		if (attachedContext) sections.push(`Attached context:\n\n${attachedContext}`);
 		if (route?.context) {
@@ -626,6 +637,7 @@ export class SovereignRouterView extends ItemView {
 		}
 		const localContext = await this.localContextFor(session, question);
 		if (localContext) sections.push(`Local persistent context:\n\n${localContext}`);
+		if (this.plugin.settings.automaticDocumentAuthoring && isDocumentRequest(question)) sections.push(documentAuthoringInstruction());
 		return sections.join('\n\n');
 	}
 
@@ -638,6 +650,20 @@ export class SovereignRouterView extends ItemView {
 			this.plugin.settings.localContextSummaryBudget,
 			this.plugin.settings.localContextMemoryBudget,
 		);
+	}
+
+	private async applyDocumentOperation(session: ChatSession, question: string, assistant: AssistantElements): Promise<void> {
+		if (!this.plugin.settings.automaticDocumentAuthoring || !isDocumentRequest(question)) return;
+		const operation = parseDocumentOperation(assistant.message.content);
+		if (!operation) return;
+		try {
+			// eslint-disable-next-line no-unsanitized/method -- parseDocumentOperation validates the vault-relative Markdown path.
+			const path = await new VaultDocumentWriter(this.app, this.plugin.settings.documentOutputRoot).write(operation);
+			this.setAssistantContent(session, assistant, `${stripDocumentOperation(assistant.message.content)}\n\nCreated or updated: [[${path.replace(/\.md$/i, '')}]]`);
+			this.setAssistantMeta(session, assistant, `Document ${operation.action}: ${path}`);
+		} catch (error) {
+			this.setAssistantContent(session, assistant, `${stripDocumentOperation(assistant.message.content)}\n\n_Document was not written: ${error instanceof Error ? error.message : 'unknown error'}_`);
+		}
 	}
 
 	private async proposeMemory(session: ChatSession): Promise<void> {
@@ -685,6 +711,9 @@ export class SovereignRouterView extends ItemView {
 			};
 		}
 
+		const requested = extractRequestedSkill(question);
+		const requestedLocal = requested ? new SkillResolver(this.app, this.plugin.settings).findLocalByName(requested.name) : null;
+		session.requestedSkill = requested?.name ?? null;
 		let route: RouteResult;
 		if (session.selectedModel) {
 			route = { model: session.selectedModel, hermesModel: null, skill: null, context: null, runtime: 'chat', note: `Manual model: ${modelLabel(session.selectedModel)}.` };
@@ -703,6 +732,11 @@ export class SovereignRouterView extends ItemView {
 		else {
 			session.resolvedRuntime = 'hermes';
 			session.hermesModelAlias = route.hermesModel;
+		}
+		if (requestedLocal) route = { ...route, runtime: 'chat', hermesModel: null, skill: requestedLocal, note: `Using requested local skill: ${requestedLocal.path}.` };
+		else if (requested && session.runtime === 'auto' && this.hasHermesCredentials()) {
+			const hermesRoute = this.plugin.settings.hermesModelRoutes.find((candidate) => candidate.alias === this.plugin.settings.hermesDefaultModelAlias);
+			if (hermesRoute && this.plugin.settings.permittedExecutorModels.includes(hermesRoute.model)) route = { ...route, model: hermesRoute.model, hermesModel: hermesRoute.alias, runtime: 'hermes', note: `Using Hermes for requested skill: ${requested.name}.` };
 		}
 		session.skill = route.skill;
 		session.context = route.context;
@@ -949,7 +983,10 @@ export class SovereignRouterView extends ItemView {
 	private async persistSession(session: ChatSession): Promise<void> {
 		if (!session.id) return;
 		session.updatedAt = new Date().toISOString();
-		try { await this.plugin.localContext.saveSession(this.toPersistedSession(session), this.plugin.settings.localContextSummaryBudget); }
+		try {
+			await this.plugin.localContext.saveSession(this.toPersistedSession(session), this.plugin.settings.localContextSummaryBudget);
+			if (this.isActive(session)) this.renderSessionTabs();
+		}
 		catch { /* Local context is optional; chat remains usable if the vault adapter is unavailable. */ }
 	}
 
@@ -967,6 +1004,7 @@ export class SovereignRouterView extends ItemView {
 			version: 1, id: session.id, number: session.number, state: session.state, createdAt: session.createdAt, updatedAt: session.updatedAt,
 			selectedModel: session.selectedModel, runtime: session.runtime, resolvedRuntime: session.resolvedRuntime, model: session.model,
 			hermesModelAlias: session.hermesModelAlias, skill: session.skill, context: session.context, useMcp: session.useMcp,
+			requestedSkill: session.requestedSkill,
 			messages: session.messages.map((message) => ({ role: message.role, content: message.content, ...(message.meta ? { meta: message.meta } : {}) })),
 		};
 	}
@@ -974,6 +1012,7 @@ export class SovereignRouterView extends ItemView {
 	private fromPersistedSession(record: PersistedSession): ChatSession {
 		return {
 			...record,
+			requestedSkill: record.requestedSkill ?? null,
 			history: record.messages.map((message) => ({ role: message.role, content: message.content })),
 			messages: record.messages.map((message) => ({ ...message })),
 			documents: [], abortController: null, hermesClient: null, hermesRunId: null,

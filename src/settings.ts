@@ -29,6 +29,8 @@ export interface SovereignRouterSettings {
 	graphifyGraphPath: string;
 	localContextSummaryBudget: number;
 	localContextMemoryBudget: number;
+	automaticDocumentAuthoring: boolean;
+	documentOutputRoot: string;
 	mcpServers: McpServerConfig[];
 }
 
@@ -55,6 +57,8 @@ export const DEFAULT_SETTINGS: SovereignRouterSettings = {
 	graphifyGraphPath: '.sovereign-router/graphify-out/graph.json',
 	localContextSummaryBudget: 6_000,
 	localContextMemoryBudget: 4_000,
+	automaticDocumentAuthoring: false,
+	documentOutputRoot: '',
 	mcpServers: [],
 };
 
@@ -138,6 +142,8 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 		this.addTextSetting('Graphify graph path', 'Vault-relative path to Graphify graph.json. Hermes must be able to access its own configured graph path before it can query the graph.', this.plugin.settings.graphifyGraphPath, async (value) => { this.plugin.settings.graphifyGraphPath = value.replace(/^[/\\]+/, ''); });
 		this.addTextSetting('Session summary budget (characters)', 'Maximum local session summary supplied as context.', String(this.plugin.settings.localContextSummaryBudget), async (value) => { this.plugin.settings.localContextSummaryBudget = positiveInteger(value, 6_000); });
 		this.addTextSetting('Approved memory budget (characters)', 'Maximum approved-memory context supplied per request.', String(this.plugin.settings.localContextMemoryBudget), async (value) => { this.plugin.settings.localContextMemoryBudget = positiveInteger(value, 4_000); });
+		new Setting(containerEl).setName('Automatic vault writing').setDesc('When enabled, document-oriented requests may create or update validated Markdown notes after the response. Ordinary chat never writes notes.').addToggle((toggle) => toggle.setValue(this.plugin.settings.automaticDocumentAuthoring).onChange(async (value) => { this.plugin.settings.automaticDocumentAuthoring = value; await this.plugin.saveSettings(); }));
+		this.addTextSetting('Document output root', 'Optional vault-relative folder that contains automatic document output. Leave blank to let validated document plans select an existing vault folder.', this.plugin.settings.documentOutputRoot, async (value) => { this.plugin.settings.documentOutputRoot = value.replace(/^[/\\]+/, ''); });
 		new Setting(containerEl).setName('MCP connections').setHeading();
 		containerEl.createEl('p', { text: 'Connect remote MCP servers over Streamable HTTP. Read-only tools can be used in chat. Write tools stay disabled until you explicitly enable them and confirm each call.' });
 		new Setting(containerEl).setName('Add MCP connection').setDesc('Use HTTPS. HTTP is accepted only for localhost.').addButton((button) => button.setButtonText('Add connection').onClick(async () => {

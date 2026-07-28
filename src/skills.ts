@@ -14,6 +14,20 @@ export class SkillResolver {
 		return reference.source === 'local' ? this.resolveLocal(reference.path) : this.resolveGitHub(reference);
 	}
 
+	findLocalByName(name: string): SkillReference | null {
+		const normalized = name.toLowerCase();
+		for (const directory of this.settings.skillSearchPaths) {
+			if (!isSafeRelativePath(directory)) continue;
+			for (const file of this.app.vault.getFiles()) {
+				if (!file.path.startsWith(`${directory}/`) || !file.name.toLowerCase().endsWith('.md')) continue;
+				const relative = file.path.slice(directory.length + 1);
+				const candidates = [file.basename, relative.replace(/\.md$/i, ''), relative.replace(/\.md$/i, '').replace(/\//g, '-')];
+				if (candidates.some((candidate) => candidate.toLowerCase() === normalized)) return { source: 'local', path: relative };
+			}
+		}
+		return null;
+	}
+
 	private async resolveLocal(path: string): Promise<ResolvedSkill> {
 		for (const directory of this.settings.skillSearchPaths) {
 			if (!isSafeRelativePath(directory)) continue;

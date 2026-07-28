@@ -14,6 +14,8 @@ import { hermesProviderOverrideError } from '../src/hermes-policy';
 import { OperationalMetrics } from '../src/operational-metrics';
 import { normalizeHermesJobs, parseHermesModelIds, parseHermesRuntimeStatus } from '../src/hermes';
 import { formatContextPackage, parseMemoryCandidates, selectMemoriesForContext, summarizeSession, type LocalMemory } from '../src/local-context';
+import { parseDocumentOperation, safeDocumentPath } from '../src/document-authoring';
+import { extractRequestedSkill } from '../src/requested-skill';
 import { SseParser } from '../src/sse';
 import type { SovereignRouterSettings } from '../src/settings';
 
@@ -40,6 +42,8 @@ const settings: SovereignRouterSettings = {
 	graphifyGraphPath: '.sovereign-router/graphify-out/graph.json',
 	localContextSummaryBudget: 6_000,
 	localContextMemoryBudget: 4_000,
+	automaticDocumentAuthoring: false,
+	documentOutputRoot: '',
 	mcpServers: [],
 };
 
@@ -220,4 +224,14 @@ run('accepts only structured, source-backed Hermes memory candidates', () => {
 	assert.deepEqual(candidates[0]?.sourceRefs, sourceRefs);
 	assert.equal(parseMemoryCandidates('[{"kind":"decision","statement":"No source","sourceRefs":[]}]', [], '2026-07-27T00:00:00.000Z').length, 0);
 	assert.equal(parseMemoryCandidates('not json', sourceRefs, '2026-07-27T00:00:00.000Z').length, 0);
+});
+
+run('parses named skill requests and safe document operations', () => {
+	assert.equal(extractRequestedSkill('Use the superpower skill to plan this.')?.name, 'superpower');
+	assert.equal(extractRequestedSkill('Use $graphify for this vault.')?.name, 'graphify');
+	assert.equal(extractRequestedSkill('What is a skill?'), null);
+	const operation = parseDocumentOperation('Answer\n```sovereign-document\n{"action":"create","path":"Projects/Plan.md","title":"Plan","content":"# Plan","reason":"Project folder exists."}\n```');
+	assert.equal(operation?.path, 'Projects/Plan.md');
+	assert.equal(safeDocumentPath('../secret.md'), false);
+	assert.equal(safeDocumentPath('.obsidian/config.md'), false);
 });

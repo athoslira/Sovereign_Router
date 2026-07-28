@@ -84,6 +84,8 @@ export default class SovereignRouterPlugin extends Plugin {
 		this.settings.graphifyGraphPath = this.settings.graphifyGraphPath ?? '.sovereign-router/graphify-out/graph.json';
 		this.settings.localContextSummaryBudget = Math.max(1_000, this.settings.localContextSummaryBudget ?? 6_000);
 		this.settings.localContextMemoryBudget = Math.max(1_000, this.settings.localContextMemoryBudget ?? 4_000);
+		this.settings.automaticDocumentAuthoring = this.settings.automaticDocumentAuthoring ?? false;
+		this.settings.documentOutputRoot = this.settings.documentOutputRoot ?? '';
 	}
 
 	async saveSettings(): Promise<void> {

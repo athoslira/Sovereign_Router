@@ -5,7 +5,8 @@ export class GraphifyContext {
 	constructor(private readonly app: App, private readonly graphPath: string) {}
 	async getStatus(): Promise<GraphifyContextStatus> {
 		const path = normalizePath(this.graphPath.trim());
-		return { state: isSafeGraphifyPath(path) && await this.app.vault.adapter.exists(path) ? 'ready' : 'unavailable', path: isSafeGraphifyPath(path) ? path : '.sovereign-router/graphify-out/graph.json' };
+		const safePath = isSafeGraphifyPath(path) ? path : '.sovereign-router/graphify-out/graph.json';
+		return { state: safePath === path && await this.app.vault.adapter.exists(safePath) ? 'ready' : 'unavailable', path: safePath };
 	}
 }
 

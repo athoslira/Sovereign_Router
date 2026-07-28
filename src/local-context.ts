@@ -30,6 +30,7 @@ export interface PersistedSession {
 	skill: SkillReference | null;
 	context: VaultContextReference | null;
 	useMcp: boolean;
+	requestedSkill: string | null;
 	messages: LocalSessionMessage[];
 }
 

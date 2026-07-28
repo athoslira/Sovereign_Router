@@ -74,6 +74,14 @@ Sessions, compact summaries, pending Hermes proposals, approved memories, and de
 
 Graphify remains an optional local Hermes skill. Generate its `graph.json` separately, then set the vault-relative path in **Settings → Sovereign Router → Local context graph**. Sovereign Router only detects that generated file and tells Hermes it is available; it never starts Graphify, Python, a terminal, or an MCP server. If no graph exists, local session summaries and approved memories continue to work.
 
+The session status line shows the time of the last successful local save. You can also verify the private records under the plugin's `context/sessions/` and `context/summaries/` folders; those paths are ignored by Git.
+
+## Explicit skills and automatic document authoring
+
+In **Auto runtime**, an explicitly named skill is resolved locally first. If no permitted local skill matches and Hermes is configured, Sovereign routes the session to Hermes and asks it to use that skill if installed. Manual runtime selection always wins.
+
+Enable **Automatic vault writing** only when you want document-oriented requests to create or update notes. The model returns a validated document operation, while Sovereign performs the actual Vault API write. Ordinary chat does not create notes, and neither Hermes nor OpenRouter receives unrestricted filesystem access.
+
 ## MCP tools
 
 Sovereign Router can call tools from remote MCP servers through Streamable HTTP. In **Settings → Sovereign Router → MCP connections**, add an endpoint, optional SecretStorage key, and enable it. On the chat panel, select **MCP** only for messages where those tools may be useful.
