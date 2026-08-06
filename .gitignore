@@ -29,3 +29,10 @@ graphify-out/
 # Python automation cache
 __pycache__/
 *.pyc
+
+# Local research unrelated to the Sovereign Router plugin
+/airdna_interview_research/
+
+# Optional VS Code adapter build output
+/vscode-extension/node_modules/
+/vscode-extension/out/

@@ -101,6 +101,14 @@ Sovereign Router can call tools from remote MCP servers through Streamable HTTP.
 - MCP servers receive only the arguments of a tool call that you enabled in the chat. Their tools can be selected by OpenRouter only after their schemas have been loaded for that request.
 - Hermes receives the prompt and any context selected for a Hermes session. It is an optional external runtime and is configured only when you choose to use it.
 
+## Sovereign work items
+
+The control center now manages a durable lifecycle for governed work: **requirement → plan → approval → Hermes execution → verification → evidence**. Work metadata stays local under the active vault, while readable Markdown artifacts are written beneath the configurable `Sovereign/Tasks` folder.
+
+Planning and verification are separate calls. A verifier completes a work item only after returning `VERDICT: PASS`; partial evidence leaves it blocked for review. An isolated worktree is an explicit request that Hermes or the optional VS Code adapter must prepare under its own approval policy — the Obsidian plugin never runs Git or a terminal.
+
+See [Sovereign Work Protocol](docs/SOVEREIGN_WORK_PROTOCOL.md) and the optional [VS Code adapter](vscode-extension/README.md).
+
 ## Development
 
 1. Install dependencies with `npm ci`.

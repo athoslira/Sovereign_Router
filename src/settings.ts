@@ -31,6 +31,7 @@ export interface SovereignRouterSettings {
 	localContextMemoryBudget: number;
 	automaticDocumentAuthoring: boolean;
 	documentOutputRoot: string;
+	workItemOutputRoot: string;
 	mcpServers: McpServerConfig[];
 }
 
@@ -59,6 +60,7 @@ export const DEFAULT_SETTINGS: SovereignRouterSettings = {
 	localContextMemoryBudget: 4_000,
 	automaticDocumentAuthoring: false,
 	documentOutputRoot: '',
+	workItemOutputRoot: 'Sovereign/Tasks',
 	mcpServers: [],
 };
 
@@ -144,6 +146,9 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 		this.addTextSetting('Approved memory budget (characters)', 'Maximum approved-memory context supplied per request.', String(this.plugin.settings.localContextMemoryBudget), async (value) => { this.plugin.settings.localContextMemoryBudget = positiveInteger(value, 4_000); });
 		new Setting(containerEl).setName('Automatic vault writing').setDesc('When enabled, document-oriented requests may create or update validated Markdown notes after the response. Ordinary chat never writes notes.').addToggle((toggle) => toggle.setValue(this.plugin.settings.automaticDocumentAuthoring).onChange(async (value) => { this.plugin.settings.automaticDocumentAuthoring = value; await this.plugin.saveSettings(); }));
 		this.addTextSetting('Document output root', 'Optional vault-relative folder that contains automatic document output. Leave blank to let validated document plans select an existing vault folder.', this.plugin.settings.documentOutputRoot, async (value) => { this.plugin.settings.documentOutputRoot = value.replace(/^[/\\]+/, ''); });
+		new Setting(containerEl).setName('Sovereign work items').setHeading();
+		containerEl.createEl('p', { text: 'Work items keep requirements, plans, execution evidence, and verification results in vault Markdown. Terminal, Git, and worktree operations stay with Hermes or a future VS Code adapter.' });
+		this.addTextSetting('Work item output root', 'Vault-relative folder for requirement, plan, execution, and evidence artifacts.', this.plugin.settings.workItemOutputRoot, async (value) => { this.plugin.settings.workItemOutputRoot = value.replace(/^[/\\]+/, '') || 'Sovereign/Tasks'; });
 		new Setting(containerEl).setName('MCP connections').setHeading();
 		containerEl.createEl('p', { text: 'Connect remote MCP servers over Streamable HTTP. Read-only tools can be used in chat. Write tools stay disabled until you explicitly enable them and confirm each call.' });
 		new Setting(containerEl).setName('Add MCP connection').setDesc('Use HTTPS. HTTP is accepted only for localhost.').addButton((button) => button.setButtonText('Add connection').onClick(async () => {

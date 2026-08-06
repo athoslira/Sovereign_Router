@@ -3,6 +3,9 @@ import { HermesClient, HermesError, type HermesJob, type HermesJobAction, type H
 import { hermesProviderOverrideError } from '../hermes-policy';
 import type SovereignRouterPlugin from '../main';
 import { confirmHermesJobAction, openCreateHermesJobModal, openEditHermesJobModal } from './hermes-job-modals';
+import { openCreateWorkItemModal, confirmWorkExecution } from './work-item-modal';
+import { WORK_STATUS_LABELS, type WorkItem } from '../work-protocol';
+import { WorkService } from '../work-service';
 
 function formatDate(value: string | number | null): string {
 	if (!value) return 'Not available';
@@ -30,6 +33,7 @@ class ControlCenterModal extends Modal {
 	private runtimeStatus: HermesRuntimeStatus | null = null;
 	private runtimeError: string | null = null;
 	private checkingRuntime = false;
+	private runningWorkId: string | null = null;
 
 	constructor(app: App, private readonly plugin: SovereignRouterPlugin) { super(app); }
 
@@ -44,6 +48,7 @@ class ControlCenterModal extends Modal {
 		const catalog = this.plugin.settings.modelCatalog;
 		const metrics = this.plugin.operationalMetrics.snapshot();
 		const mcpServers = this.plugin.settings.mcpServers;
+		const workItems = await this.plugin.workStore.list();
 		const openRouterReady = hasSecret(this.app, this.plugin.settings.openRouterSecretName);
 		const hermesReady = Boolean(this.plugin.settings.hermesServiceUrl) && hasSecret(this.app, this.plugin.settings.hermesSecretName);
 
@@ -106,6 +111,7 @@ class ControlCenterModal extends Modal {
 				await this.render();
 			}));
 
+		this.renderWorkItems(workItems, openRouterReady, hermesReady);
 		this.renderJobs(hermesReady);
 	}
 
@@ -243,6 +249,102 @@ class ControlCenterModal extends Modal {
 			}
 		});
 	}
+
+	private renderWorkItems(items: WorkItem[], openRouterReady: boolean, hermesReady: boolean): void {
+		const section = this.contentEl.createDiv({ cls: 'sr-control-work' });
+		section.createEl('h3', { text: 'Sovereign work items' });
+		section.createEl('p', { text: 'Governed lifecycle: requirement, plan, approval, Hermes execution, and independent verification. The plugin does not run Git, worktrees, or a terminal.' });
+		const actions = section.createDiv({ cls: 'sr-control-job-actions' });
+		actions.createEl('button', { text: 'New work item' }).addEventListener('click', () => this.openCreateWorkItem());
+		actions.createEl('button', { text: 'Refresh' }).addEventListener('click', () => void this.render());
+		if (items.length === 0) { section.createEl('p', { text: 'No work items yet. Start with a requirement, then generate a plan before execution.' }); return; }
+		for (const item of items) this.renderWorkItem(section, item, openRouterReady, hermesReady);
+	}
+
+	private renderWorkItem(container: HTMLElement, item: WorkItem, openRouterReady: boolean, hermesReady: boolean): void {
+		const row = container.createDiv({ cls: 'sr-control-work-item' });
+		const heading = row.createDiv({ cls: 'sr-control-work-heading' });
+		heading.createEl('strong', { text: item.title });
+		heading.createSpan({ text: WORK_STATUS_LABELS[item.status], cls: `sr-work-status is-${item.status}` });
+		row.createDiv({ text: item.requirement, cls: 'sr-control-work-requirement' });
+		row.createDiv({ text: `Workspace: ${item.workspaceMode === 'isolated-worktree' ? 'isolated worktree requested' : 'existing workspace'}${item.workspaceHint ? ` · ${item.workspaceHint}` : ''}`, cls: 'sr-control-job-meta' });
+		row.createDiv({ text: `Updated: ${formatDate(item.updatedAt)} · Artifacts: ${item.artifacts.map((artifact) => artifact.kind).join(', ') || 'requirement pending'}`, cls: 'sr-control-job-meta' });
+		const actions = row.createDiv({ cls: 'sr-control-job-actions' });
+		if (item.status === 'draft' || item.status === 'blocked' || item.status === 'failed') {
+			const plan = actions.createEl('button', { text: 'Generate plan' });
+			plan.disabled = !openRouterReady;
+			plan.addEventListener('click', () => void this.planWorkItem(item));
+		}
+		if (item.status === 'planned') actions.createEl('button', { text: 'Approve plan', cls: 'mod-cta' }).addEventListener('click', () => void this.approveWorkItem(item));
+		if (item.status === 'approved') {
+			const execute = actions.createEl('button', { text: this.runningWorkId === item.id ? 'Running...' : 'Run with Hermes', cls: 'mod-cta' });
+			execute.disabled = !hermesReady || this.runningWorkId !== null;
+			execute.addEventListener('click', () => void this.executeWorkItem(item));
+		}
+		if (item.status === 'verifying') {
+			const verify = actions.createEl('button', { text: 'Verify execution' });
+			verify.disabled = !openRouterReady;
+			verify.addEventListener('click', () => void this.verifyWorkItem(item));
+		}
+		if (item.status !== 'completed' && item.status !== 'cancelled' && item.status !== 'running') actions.createEl('button', { text: 'Cancel', cls: 'mod-warning' }).addEventListener('click', () => void this.cancelWorkItem(item));
+		const events = row.createEl('details', { cls: 'sr-work-events' });
+		events.createEl('summary', { text: `History (${item.events.length})` });
+		for (const event of item.events.slice(-8).reverse()) events.createDiv({ text: `${formatDate(event.createdAt)} · ${event.message}`, cls: 'sr-control-job-meta' });
+	}
+
+	private openCreateWorkItem(): void {
+		openCreateWorkItemModal(this.app, async (input) => {
+			try { await this.workService().create(input); new Notice('Work item created. Generate a plan before approving execution.'); await this.render(); return true; }
+			catch (error) { new Notice(`Could not create work item: ${formatError(error)}`); return false; }
+		});
+	}
+
+	private async planWorkItem(item: WorkItem): Promise<void> {
+		const apiKey = this.openRouterKey();
+		if (!apiKey) return;
+		try { await this.workService().plan(item, apiKey); new Notice('Plan artifact created. Review it before approving execution.'); await this.render(); }
+		catch (error) { new Notice(`Could not generate plan: ${formatError(error)}`); }
+	}
+
+	private async approveWorkItem(item: WorkItem): Promise<void> {
+		try { await this.workService().approve(item); new Notice('Plan approved. Hermes execution is now available.'); await this.render(); }
+		catch (error) { new Notice(`Could not approve plan: ${formatError(error)}`); }
+	}
+
+	private async executeWorkItem(item: WorkItem): Promise<void> {
+		if (!await confirmWorkExecution(this.app, item)) return;
+		if (!this.hermesClient()) return;
+		const key = this.plugin.settings.hermesSecretName ? this.app.secretStorage.getSecret(this.plugin.settings.hermesSecretName) : null;
+		if (!key) return;
+		this.runningWorkId = item.id;
+		await this.render();
+		try {
+			await this.workService().execute(item, key, () => { /* Execution output is stored as an artifact after streaming completes. */ }, new AbortController().signal);
+			new Notice('Hermes execution finished. Verify the evidence before completion.');
+		} catch (error) { new Notice(`Hermes execution ended: ${formatError(error)}`); }
+		finally { this.runningWorkId = null; await this.render(); }
+	}
+
+	private async verifyWorkItem(item: WorkItem): Promise<void> {
+		const apiKey = this.openRouterKey();
+		if (!apiKey) return;
+		try { const verified = await this.workService().verify(item, apiKey); new Notice(`Verification finished: ${WORK_STATUS_LABELS[verified.status]}.`); await this.render(); }
+		catch (error) { new Notice(`Could not verify work item: ${formatError(error)}`); }
+	}
+
+	private async cancelWorkItem(item: WorkItem): Promise<void> {
+		try { await this.workService().cancel(item); new Notice('Work item cancelled.'); await this.render(); }
+		catch (error) { new Notice(`Could not cancel work item: ${formatError(error)}`); }
+	}
+
+	private openRouterKey(): string | null {
+		const secret = this.plugin.settings.openRouterSecretName;
+		const key = secret ? this.app.secretStorage.getSecret(secret) : null;
+		if (!key) new Notice('Configure the OpenRouter API key first.');
+		return key;
+	}
+
+	private workService(): WorkService { return new WorkService(this.app, this.plugin.workStore, this.plugin.settings); }
 
 	private hermesClient(): HermesClient | null {
 		const secretName = this.plugin.settings.hermesSecretName;

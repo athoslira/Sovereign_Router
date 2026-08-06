@@ -1,10 +1,11 @@
-import { App, normalizePath, TFolder } from 'obsidian';
+import { App, TFolder } from 'obsidian';
 import type { DocumentOperation } from './document-authoring';
+import { vaultOutputPath } from './vault-path-policy';
 
 export class VaultDocumentWriter {
 	constructor(private readonly app: App, private readonly outputRoot: string) {}
 	async write(operation: DocumentOperation): Promise<string> {
-		const path = normalizePath(this.outputRoot ? `${this.outputRoot}/${operation.path}` : operation.path);
+		const path = vaultOutputPath(this.outputRoot, operation.path);
 		await this.ensureParentFolders(path);
 		const existing = this.app.vault.getFileByPath(path);
 		if (operation.action === 'create') {

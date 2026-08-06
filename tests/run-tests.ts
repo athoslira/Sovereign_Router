@@ -15,7 +15,9 @@ import { OperationalMetrics } from '../src/operational-metrics';
 import { normalizeHermesJobs, parseHermesModelIds, parseHermesRuntimeStatus } from '../src/hermes';
 import { formatContextPackage, parseMemoryCandidates, selectMemoriesForContext, summarizeSession, type LocalMemory } from '../src/local-context';
 import { parseDocumentOperation, safeDocumentPath } from '../src/document-authoring';
+import { safeVaultRelativeRoot, vaultOutputPath } from '../src/vault-path-policy';
 import { extractRequestedSkill } from '../src/requested-skill';
+import { canTransitionWorkItem, createWorkEvent, plannerPrompt, safeWorkOutputRoot, safeWorkPathSegment, verifierPrompt, workArtifactPath, type WorkItem } from '../src/work-protocol';
 import { SseParser } from '../src/sse';
 import type { SovereignRouterSettings } from '../src/settings';
 
@@ -44,6 +46,7 @@ const settings: SovereignRouterSettings = {
 	localContextMemoryBudget: 4_000,
 	automaticDocumentAuthoring: false,
 	documentOutputRoot: '',
+	workItemOutputRoot: 'Sovereign/Tasks',
 	mcpServers: [],
 };
 
@@ -234,4 +237,30 @@ run('parses named skill requests and safe document operations', () => {
 	assert.equal(operation?.path, 'Projects/Plan.md');
 	assert.equal(safeDocumentPath('../secret.md'), false);
 	assert.equal(safeDocumentPath('.obsidian/config.md'), false);
+});
+
+run('keeps automatic document output inside the vault', () => {
+	assert.equal(safeVaultRelativeRoot('Sovereign/Documents'), 'Sovereign/Documents');
+	assert.equal(safeVaultRelativeRoot('../outside'), null);
+	assert.equal(safeVaultRelativeRoot('C:/outside'), null);
+	assert.equal(vaultOutputPath('Sovereign/Documents', 'Plans/roadmap.md'), 'Sovereign/Documents/Plans/roadmap.md');
+	assert.throws(() => vaultOutputPath('../outside', 'roadmap.md'));
+	assert.throws(() => vaultOutputPath('Sovereign', '../roadmap.md'));
+});
+
+run('enforces durable work-item transitions and safe artifact paths', () => {
+	assert.equal(canTransitionWorkItem('draft', 'planned'), true);
+	assert.equal(canTransitionWorkItem('draft', 'running'), false);
+	assert.equal(canTransitionWorkItem('verifying', 'completed'), true);
+	assert.equal(canTransitionWorkItem('completed', 'approved'), false);
+	assert.equal(safeWorkPathSegment('Projeto Héstia / API!'), 'projeto-hestia-api');
+	assert.equal(safeWorkOutputRoot('Sovereign/Tasks'), 'Sovereign/Tasks');
+	assert.equal(safeWorkOutputRoot('../outside'), null);
+	const item: WorkItem = {
+		version: 1, id: 'work-12345678', title: 'Improve API', requirement: 'Add governed tasks.', status: 'draft', workspaceMode: 'isolated-worktree', workspaceHint: 'C:/repo',
+		createdAt: '2026-08-06T00:00:00.000Z', updatedAt: '2026-08-06T00:00:00.000Z', artifacts: [], events: [createWorkEvent('created', 'Created')],
+	};
+	assert.equal(workArtifactPath('Sovereign/Tasks', item, 'plan'), 'Sovereign/Tasks/improve-api-12345678/plan.md');
+	assert.match(plannerPrompt(item), /isolated-worktree/);
+	assert.match(verifierPrompt(item, '# Plan', '# Execution'), /VERDICT: PASS/);
 });

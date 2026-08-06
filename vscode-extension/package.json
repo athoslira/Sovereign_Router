@@ -1,0 +1,28 @@
+{
+  "name": "sovereign-router-vscode",
+  "displayName": "Sovereign Router Work Items",
+  "description": "Open Sovereign Router work artifacts and prepare approved isolated Git worktrees.",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.95.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onCommand:sovereignRouter.openWorkItem", "onCommand:sovereignRouter.prepareWorktree"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "sovereignRouter.openWorkItem", "title": "Sovereign Router: Open work item" },
+      { "command": "sovereignRouter.prepareWorktree", "title": "Sovereign Router: Prepare approved worktree" }
+    ],
+    "configuration": {
+      "title": "Sovereign Router",
+      "properties": {
+        "sovereignRouter.vaultPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the Obsidian vault that contains Sovereign Router work items."
+        }
+      }
+    }
+  },
+  "scripts": { "compile": "tsc -p ." },
+  "devDependencies": { "@types/node": "^22.15.17", "@types/vscode": "^1.95.0", "typescript": "^5.8.3" }
+}

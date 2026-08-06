@@ -48,6 +48,18 @@
 .sr-control-value.is-ready { color: var(--text-success); }
 .sr-control-value.is-warning, .sr-control-error { color: var(--text-error); }
 .sr-control-jobs { margin-top: 18px; }
+.sr-control-work { margin-top: 18px; }
+.sr-control-work h3 { margin-bottom: 6px; }
+.sr-control-work-item { margin-top: 8px; padding: 9px; border: 1px solid var(--background-modifier-border); border-radius: 7px; background: var(--background-secondary); }
+.sr-control-work-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.sr-control-work-requirement { margin-top: 6px; overflow-wrap: anywhere; }
+.sr-work-status { flex: 0 0 auto; padding: 2px 6px; border-radius: 999px; background: var(--background-modifier-border); color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.sr-work-status.is-approved, .sr-work-status.is-completed { background: color-mix(in srgb, var(--text-success) 18%, transparent); color: var(--text-success); }
+.sr-work-status.is-running, .sr-work-status.is-verifying { background: color-mix(in srgb, var(--interactive-accent) 18%, transparent); color: var(--interactive-accent); }
+.sr-work-status.is-blocked, .sr-work-status.is-failed, .sr-work-status.is-cancelled { background: color-mix(in srgb, var(--text-error) 16%, transparent); color: var(--text-error); }
+.sr-work-events { margin-top: 8px; }
+.sr-work-events summary { color: var(--text-muted); cursor: pointer; font-size: var(--font-ui-smaller); }
+.sr-work-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .sr-control-jobs h3 { margin-bottom: 6px; }
 .sr-control-job { margin-top: 8px; }
 .sr-control-job-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }

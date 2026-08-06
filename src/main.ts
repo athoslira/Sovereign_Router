@@ -8,21 +8,29 @@ import { SovereignRouterView, VIEW_TYPE_SOVEREIGN_ROUTER } from './ui/chat-view'
 import { openControlCenter } from './ui/control-center-modal';
 import { VaultContextIndex } from './vault-context-index';
 import { LocalContextStore } from './local-context-store';
+import { WorkStore } from './work-store';
 
 export default class SovereignRouterPlugin extends Plugin {
 	settings!: SovereignRouterSettings;
 	contextIndex!: VaultContextIndex;
 	localContext!: LocalContextStore;
+	workStore!: WorkStore;
 	readonly operationalMetrics = new OperationalMetrics();
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.contextIndex = new VaultContextIndex(this.app, this.manifest);
 		this.localContext = new LocalContextStore(this.app, this.manifest);
+		this.workStore = new WorkStore(this.app, this.manifest);
 		try {
 			await this.localContext.start();
 		} catch {
 			new Notice('Local context storage is unavailable. Chat remains available, but sessions will not persist.');
+		}
+		try {
+			await this.workStore.start();
+		} catch {
+			new Notice('Work item storage is unavailable. Existing chat features remain available.');
 		}
 		this.app.workspace.onLayoutReady(() => {
 			void this.contextIndex.start();
@@ -48,6 +56,11 @@ export default class SovereignRouterPlugin extends Plugin {
 		this.addCommand({
 			id: 'open-control-center',
 			name: 'Open control center',
+			callback: () => openControlCenter(this.app, this),
+		});
+		this.addCommand({
+			id: 'open-work-items',
+			name: 'Open work items',
 			callback: () => openControlCenter(this.app, this),
 		});
 		this.addSettingTab(new SovereignRouterSettingTab(this.app, this));
@@ -86,6 +99,7 @@ export default class SovereignRouterPlugin extends Plugin {
 		this.settings.localContextMemoryBudget = Math.max(1_000, this.settings.localContextMemoryBudget ?? 4_000);
 		this.settings.automaticDocumentAuthoring = this.settings.automaticDocumentAuthoring ?? false;
 		this.settings.documentOutputRoot = this.settings.documentOutputRoot ?? '';
+		this.settings.workItemOutputRoot = this.settings.workItemOutputRoot ?? 'Sovereign/Tasks';
 	}
 
 	async saveSettings(): Promise<void> {
