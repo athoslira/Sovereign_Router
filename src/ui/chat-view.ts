@@ -130,10 +130,14 @@ export class SovereignRouterView extends ItemView {
 		this.containerEl.empty();
 		this.containerEl.addClass('sovereign-router-view');
 		const header = this.containerEl.createDiv({ cls: 'sr-header' });
-		header.createEl('h4', { text: 'Sovereign Router' });
+		const brand = header.createDiv({ cls: 'sr-brand' });
+		brand.createSpan({ text: 'SR', cls: 'sr-brand-mark' });
+		const brandText = brand.createDiv({ cls: 'sr-brand-text' });
+		brandText.createEl('strong', { text: 'Sovereign Router' });
+		brandText.createSpan({ text: 'Local control plane', cls: 'sr-header-note' });
 		const controls = header.createDiv({ cls: 'sr-header-controls' });
-		const controlCenterButton = controls.createEl('button', { text: 'Control', cls: 'sr-control-button', attr: { 'aria-label': 'Open control center' } });
-		this.runtimeSelect = controls.createEl('select', { cls: 'sr-model-select', attr: { 'aria-label': 'Execution runtime' } });
+		const controlCenterButton = controls.createEl('button', { text: 'Control center', cls: 'sr-control-button', attr: { 'aria-label': 'Open control center', title: 'Open control center' } });
+		this.runtimeSelect = controls.createEl('select', { cls: 'sr-runtime-select', attr: { 'aria-label': 'Execution runtime' } });
 		this.runtimeSelect.createEl('option', { text: 'Auto runtime', value: 'auto' });
 		this.runtimeSelect.createEl('option', { text: 'Sovereign chat', value: 'chat' });
 		this.runtimeSelect.createEl('option', { text: 'Hermes Agent', value: 'hermes' });
@@ -148,14 +152,13 @@ export class SovereignRouterView extends ItemView {
 		const mcpControl = controls.createEl('label', { cls: 'sr-mcp-toggle' });
 		this.mcpToggle = mcpControl.createEl('input', { attr: { type: 'checkbox', 'aria-label': 'Use MCP tools' } });
 		mcpControl.createSpan({ text: 'MCP' });
-		controls.createSpan({ text: 'Session only', cls: 'sr-header-note' });
 
 		const sessionBar = this.containerEl.createDiv({ cls: 'sr-session-bar' });
 		this.sessionListEl = sessionBar.createDiv({ cls: 'sr-session-list' });
 		const sessionActions = sessionBar.createDiv({ cls: 'sr-session-actions' });
-		this.newSessionButton = sessionActions.createEl('button', { text: 'New session', cls: 'sr-session-button' });
-		this.endSessionButton = sessionActions.createEl('button', { text: 'End session', cls: 'sr-session-button' });
-		this.memoryButton = sessionActions.createEl('button', { text: 'Propose memory', cls: 'sr-session-button' });
+		this.newSessionButton = sessionActions.createEl('button', { text: '+ New', cls: 'sr-session-button', attr: { title: 'Start a new session' } });
+		this.endSessionButton = sessionActions.createEl('button', { text: 'End', cls: 'sr-session-button', attr: { title: 'End the current session' } });
+		this.memoryButton = sessionActions.createEl('button', { text: 'Memory', cls: 'sr-session-button', attr: { title: 'Propose durable memory from this session' } });
 		this.sessionStatusEl = this.containerEl.createDiv({ cls: 'sr-session-status' });
 
 		this.messagesEl = this.containerEl.createDiv({ cls: 'sr-messages' });
@@ -171,13 +174,13 @@ export class SovereignRouterView extends ItemView {
 		});
 		this.inputEl = composer.createEl('textarea', {
 			cls: 'sr-input',
-			attr: { placeholder: 'Ask anything...', rows: '3', 'aria-label': 'Chat message' },
+			attr: { placeholder: 'Message Sovereign Router…', rows: '3', 'aria-label': 'Chat message' },
 		});
 		const actions = composer.createDiv({ cls: 'sr-actions' });
-		this.attachButton = actions.createEl('button', { text: 'Attach document', cls: 'sr-button sr-attach' });
-		this.folderButton = actions.createEl('button', { text: 'Attach vault folder', cls: 'sr-button sr-folder' });
-		this.cancelButton = actions.createEl('button', { text: 'Cancel', cls: 'sr-button sr-cancel' });
-		this.sendButton = actions.createEl('button', { text: 'Send', cls: 'sr-button sr-send' });
+		this.attachButton = actions.createEl('button', { text: 'Attach', cls: 'sr-button', attr: { title: 'Attach a document' } });
+		this.folderButton = actions.createEl('button', { text: 'Vault folder', cls: 'sr-button', attr: { title: 'Attach files from a vault folder' } });
+		this.cancelButton = actions.createEl('button', { text: 'Cancel', cls: 'sr-button sr-cancel', attr: { title: 'Cancel the active request' } });
+		this.sendButton = actions.createEl('button', { text: 'Send ↵', cls: 'sr-button sr-send', attr: { title: 'Send message (Enter)' } });
 
 		this.registerDomEvent(this.inputEl, 'keydown', (event: KeyboardEvent) => {
 			if (event.key === 'Enter' && !event.shiftKey) {
@@ -212,6 +215,7 @@ export class SovereignRouterView extends ItemView {
 		this.registerDomEvent(this.newSessionButton, 'click', () => this.createSession());
 		this.registerDomEvent(this.endSessionButton, 'click', () => void this.endActiveSession());
 		this.registerDomEvent(this.memoryButton, 'click', () => void this.proposeMemory(this.activeSession));
+		this.registerDomEvent(window, 'keydown', (event: KeyboardEvent) => this.handleCopyShortcut(event), true);
 
 		await this.restoreSessions();
 	}
@@ -921,9 +925,42 @@ export class SovereignRouterView extends ItemView {
 
 	private createMessageElement(message: SessionDisplayMessage): { bodyEl: HTMLElement; metaEl: HTMLElement | null } {
 		const messageEl = this.messagesEl.createDiv({ cls: `sr-message sr-${message.role}` });
+		messageEl.createDiv({ text: message.role === 'user' ? 'You' : 'Sovereign', cls: 'sr-message-role' });
 		if (message.role === 'user') return { bodyEl: messageEl.createDiv({ text: message.content, cls: 'sr-message-body' }), metaEl: null };
 		const metaEl = messageEl.createDiv({ text: message.meta || '', cls: 'sr-message-meta' });
 		return { bodyEl: messageEl.createDiv({ text: message.content, cls: 'sr-message-body' }), metaEl };
+	}
+
+	private handleCopyShortcut(event: KeyboardEvent): void {
+		if ((!event.ctrlKey && !event.metaKey) || event.key.toLowerCase() !== 'c') return;
+		const selection = window.getSelection();
+		if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
+		const range = selection.getRangeAt(0);
+		if (!this.containerEl.contains(range.commonAncestorContainer)) return;
+		event.preventDefault();
+		event.stopPropagation();
+		void this.copyToClipboard(selection.toString()).catch(() => new Notice('Could not copy the selected text.'));
+	}
+
+	private async copyToClipboard(content: string): Promise<void> {
+		try {
+			if (navigator.clipboard?.writeText) {
+				await navigator.clipboard.writeText(content);
+				return;
+			}
+		} catch { /* Some mobile WebViews deny Clipboard API access; use the browser fallback below. */ }
+		const fallback = document.createElement('textarea');
+		try {
+			fallback.value = content;
+			fallback.setAttribute('readonly', '');
+			fallback.style.position = 'fixed';
+			fallback.style.opacity = '0';
+			document.body.appendChild(fallback);
+			fallback.select();
+			if (!document.execCommand('copy')) throw new Error('Copy command was unavailable.');
+		} finally {
+			fallback.remove();
+		}
 	}
 
 	private setAssistantContent(session: ChatSession, assistant: AssistantElements, content: string): void {
@@ -953,8 +990,8 @@ export class SovereignRouterView extends ItemView {
 
 	private refreshSessionUi(session: ChatSession, actionLabel?: string): void {
 		if (!this.isActive(session)) return;
-		this.attachButton.setText(actionLabel || 'Attach document');
-		this.folderButton.setText(actionLabel || 'Attach vault folder');
+		this.attachButton.setText(actionLabel || 'Attach');
+		this.folderButton.setText(actionLabel || 'Vault folder');
 		this.renderSessionTabs();
 		this.setBusy();
 	}

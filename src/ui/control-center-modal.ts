@@ -38,9 +38,12 @@ class ControlCenterModal extends Modal {
 	constructor(app: App, private readonly plugin: SovereignRouterPlugin) { super(app); }
 
 	onOpen(): void {
+		this.modalEl.addClass('sr-control-center-modal');
 		this.titleEl.setText('Sovereign control center');
 		void this.render();
 	}
+
+	onClose(): void { this.modalEl.removeClass('sr-control-center-modal'); }
 
 	private async render(): Promise<void> {
 		this.contentEl.empty();
