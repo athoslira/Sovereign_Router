@@ -111,7 +111,6 @@ export class SovereignRouterView extends ItemView {
 	private sendButton!: HTMLButtonElement;
 	private cancelButton!: HTMLButtonElement;
 	private newSessionButton!: HTMLButtonElement;
-	private endSessionButton!: HTMLButtonElement;
 	private memoryButton!: HTMLButtonElement;
 
 	constructor(leaf: WorkspaceLeaf, private readonly plugin: SovereignRouterPlugin) {
@@ -157,7 +156,6 @@ export class SovereignRouterView extends ItemView {
 		this.sessionListEl = sessionBar.createDiv({ cls: 'sr-session-list' });
 		const sessionActions = sessionBar.createDiv({ cls: 'sr-session-actions' });
 		this.newSessionButton = sessionActions.createEl('button', { text: '+ New', cls: 'sr-session-button', attr: { title: 'Start a new session' } });
-		this.endSessionButton = sessionActions.createEl('button', { text: 'End', cls: 'sr-session-button', attr: { title: 'End the current session' } });
 		this.memoryButton = sessionActions.createEl('button', { text: 'Memory', cls: 'sr-session-button', attr: { title: 'Propose durable memory from this session' } });
 		this.sessionStatusEl = this.containerEl.createDiv({ cls: 'sr-session-status' });
 
@@ -213,7 +211,6 @@ export class SovereignRouterView extends ItemView {
 			void this.persistSession(session);
 		});
 		this.registerDomEvent(this.newSessionButton, 'click', () => this.createSession());
-		this.registerDomEvent(this.endSessionButton, 'click', () => void this.endActiveSession());
 		this.registerDomEvent(this.memoryButton, 'click', () => void this.proposeMemory(this.activeSession));
 		this.registerDomEvent(window, 'keydown', (event: KeyboardEvent) => this.handleCopyShortcut(event), true);
 
@@ -273,6 +270,7 @@ export class SovereignRouterView extends ItemView {
 	private async restoreSessions(): Promise<void> {
 		const persisted = await this.plugin.localContext.listSessions();
 		for (const record of persisted) {
+			if (record.state !== 'active') continue;
 			const session = this.fromPersistedSession(record);
 			this.sessions.set(session.id, session);
 			this.sessionOrder.push(session.id);
@@ -297,14 +295,23 @@ export class SovereignRouterView extends ItemView {
 		await this.renderMessages(session);
 	}
 
-	private async endActiveSession(): Promise<void> {
-		const session = this.activeSession;
-		if (session.abortController || session.isConvertingDocument) return;
-		const index = this.sessionOrder.indexOf(session.id);
+	private async closeSession(id: string): Promise<void> {
+		const session = this.sessions.get(id);
+		if (!session) return;
+		const index = this.sessionOrder.indexOf(id);
 		session.state = 'ended';
-		session.updatedAt = new Date().toISOString();
-		await this.persistSession(session);
-		const nextSessionId = this.sessionOrder.slice(index + 1).find((id) => this.sessions.get(id)?.state === 'active') ?? this.sessionOrder.slice(0, index).reverse().find((id) => this.sessions.get(id)?.state === 'active');
+		await this.cancelRequest(session);
+		const timer = this.persistTimers.get(id);
+		if (timer !== undefined) window.clearTimeout(timer);
+		this.persistTimers.delete(id);
+		this.sessions.delete(id);
+		if (index >= 0) this.sessionOrder.splice(index, 1);
+		await this.plugin.localContext.deleteSession(id);
+		if (id !== this.activeSessionId) {
+			this.renderSessionTabs();
+			return;
+		}
+		const nextSessionId = this.sessionOrder[index] ?? this.sessionOrder[index - 1];
 		if (nextSessionId) await this.activateSession(nextSessionId);
 		else this.createSession();
 	}
@@ -316,18 +323,21 @@ export class SovereignRouterView extends ItemView {
 			if (!session) continue;
 			const model = session.model ?? session.selectedModel;
 			const state = session.resolvedRuntime === 'hermes' || session.runtime === 'hermes' ? 'Hermes Agent' : model ? modelLabel(model) : 'Auto route';
-			const button = this.sessionListEl.createEl('button', {
+			const tab = this.sessionListEl.createDiv({ cls: 'sr-session-tab-wrap' });
+			const button = tab.createEl('button', {
 				text: `Session ${session.number} · ${state}`,
 				cls: 'sr-session-tab',
 			});
-			if (session.id === this.activeSessionId) button.addClass('is-active');
+			if (session.id === this.activeSessionId) tab.addClass('is-active');
 			this.registerDomEvent(button, 'click', () => void this.activateSession(session.id));
+			const close = tab.createEl('button', { text: '×', cls: 'sr-session-close', attr: { 'aria-label': `Close Session ${session.number}`, title: 'Close and end this session' } });
+			this.registerDomEvent(close, 'click', (event: MouseEvent) => {
+				event.preventDefault();
+				event.stopPropagation();
+				void this.closeSession(session.id);
+			});
 		}
 		const session = this.activeSession;
-		if (session.state === 'ended') {
-			this.sessionStatusEl.setText(`Ended session · preserved locally at ${new Date(session.updatedAt).toLocaleTimeString()} and read-only.`);
-			return;
-		}
 		if (session.resolvedRuntime === 'hermes') {
 			this.sessionStatusEl.setText(`Active session · Hermes Agent is handling this task outside Obsidian. Local context saved ${new Date(session.updatedAt).toLocaleTimeString()}.`);
 			return;
@@ -338,7 +348,7 @@ export class SovereignRouterView extends ItemView {
 	}
 
 	private isActive(session: ChatSession): boolean {
-		return session.id === this.activeSessionId;
+		return session.id === this.activeSessionId && this.sessions.get(session.id) === session;
 	}
 
 	private canInteract(session: ChatSession): boolean {
@@ -1007,7 +1017,6 @@ export class SovereignRouterView extends ItemView {
 		this.modelSelect.disabled = controlsDisabled || Boolean(session.model) || session.resolvedRuntime === 'hermes' || session.runtime === 'hermes';
 		this.runtimeSelect.disabled = controlsDisabled || Boolean(session.model) || Boolean(session.resolvedRuntime);
 		this.mcpToggle.disabled = controlsDisabled || session.resolvedRuntime === 'hermes' || session.runtime === 'hermes';
-		this.endSessionButton.disabled = controlsDisabled;
 		this.memoryButton.disabled = controlsDisabled;
 	}
 
@@ -1018,7 +1027,7 @@ export class SovereignRouterView extends ItemView {
 	}
 
 	private async persistSession(session: ChatSession): Promise<void> {
-		if (!session.id) return;
+		if (!session.id || !this.sessions.has(session.id)) return;
 		session.updatedAt = new Date().toISOString();
 		try {
 			await this.plugin.localContext.saveSession(this.toPersistedSession(session), this.plugin.settings.localContextSummaryBudget);
@@ -1032,7 +1041,7 @@ export class SovereignRouterView extends ItemView {
 		if (existing !== undefined) window.clearTimeout(existing);
 		this.persistTimers.set(session.id, window.setTimeout(() => {
 			this.persistTimers.delete(session.id);
-			void this.persistSession(session);
+			if (this.sessions.has(session.id)) void this.persistSession(session);
 		}, 500));
 	}
 

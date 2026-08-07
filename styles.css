@@ -106,8 +106,16 @@
 	font-size: var(--font-ui-smaller);
 }
 .sr-session-button { padding-inline: 8px; }
+.sr-session-tab-wrap {
+	display: flex;
+	flex: 0 0 auto;
+	max-width: 220px;
+	border: 1px solid transparent;
+	border-radius: 6px;
+}
 .sr-session-tab {
-	max-width: 200px;
+	min-width: 0;
+	max-width: 190px;
 	overflow: hidden;
 	border-color: transparent;
 	background: transparent;
@@ -115,7 +123,20 @@
 	color: var(--text-muted);
 }
 .sr-session-tab:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
-.sr-session-tab.is-active { border-color: var(--interactive-accent); background: color-mix(in srgb, var(--interactive-accent) 14%, transparent); color: var(--text-normal); }
+.sr-session-tab-wrap.is-active { border-color: var(--interactive-accent); background: color-mix(in srgb, var(--interactive-accent) 14%, transparent); }
+.sr-session-tab-wrap.is-active .sr-session-tab { color: var(--text-normal); }
+.sr-session-close {
+	flex: 0 0 25px;
+	min-height: 28px !important;
+	padding: 0;
+	border: 0;
+	border-radius: 0 5px 5px 0 !important;
+	background: transparent;
+	color: var(--text-muted);
+	font-size: 17px;
+	line-height: 1;
+}
+.sr-session-close:hover { background: var(--background-modifier-hover); color: var(--text-error); }
 .sr-session-status { padding: 6px 12px; border-bottom: 1px solid var(--background-modifier-border); }
 
 .sr-messages {
@@ -237,7 +258,8 @@
 	.sr-session-list,
 	.sr-session-actions { width: 100%; }
 	.sr-session-actions { justify-content: flex-end; }
-	.sr-session-tab { max-width: 165px; }
+	.sr-session-tab-wrap { max-width: 180px; }
+	.sr-session-tab { max-width: 150px; }
 	.sr-messages { padding: 14px 10px 20px; }
 	.sr-user .sr-message-body { max-width: 96%; }
 	.sr-composer { padding: 9px 10px 10px; }

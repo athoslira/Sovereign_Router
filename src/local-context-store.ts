@@ -34,6 +34,12 @@ export class LocalContextStore {
 		return (await this.readDirectory<PersistedSession>(this.sessionsDirectory)).filter((session) => session.version === 1 && Boolean(session.id)).sort((left, right) => left.number - right.number);
 	}
 
+	async deleteSession(id: string): Promise<void> {
+		for (const path of [`${this.sessionsDirectory}/${id}.json`, `${this.summariesDirectory}/${id}.json`]) {
+			if (await this.app.vault.adapter.exists(path)) await this.app.vault.adapter.remove(path);
+		}
+	}
+
 	async saveCandidate(candidate: LocalMemoryCandidate): Promise<void> {
 		await this.ensureDirectories();
 		await this.writeJson(`${this.candidatesDirectory}/${candidate.id}.json`, candidate);
