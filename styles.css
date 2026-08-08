@@ -183,6 +183,7 @@
 	background: var(--background-primary-alt);
 	box-shadow: 0 -8px 24px color-mix(in srgb, var(--background-primary) 75%, transparent);
 }
+.sr-composer.is-dragging { outline: 2px dashed var(--interactive-accent); outline-offset: -5px; background: color-mix(in srgb, var(--interactive-accent) 8%, var(--background-primary-alt)); }
 .sr-input {
 	box-sizing: border-box;
 	width: 100%;

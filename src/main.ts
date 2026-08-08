@@ -1,4 +1,5 @@
-import { Notice, Plugin, requestUrl } from 'obsidian';
+import { Notice, Plugin, requestUrl, TFile } from 'obsidian';
+import { isCanvasFile } from './canvas';
 import { DEFAULT_EXECUTOR_MODELS } from './models';
 import { DEFAULT_HERMES_MODEL_ALIAS, DEFAULT_HERMES_MODEL_ROUTES } from './hermes-models';
 import { fetchOpenRouterModelCatalog, isCatalogFresh } from './model-catalog';
@@ -15,6 +16,7 @@ export default class SovereignRouterPlugin extends Plugin {
 	contextIndex!: VaultContextIndex;
 	localContext!: LocalContextStore;
 	workStore!: WorkStore;
+	private lastCanvasPath: string | null = null;
 	readonly operationalMetrics = new OperationalMetrics();
 
 	async onload(): Promise<void> {
@@ -33,6 +35,9 @@ export default class SovereignRouterPlugin extends Plugin {
 			new Notice('Work item storage is unavailable. Existing chat features remain available.');
 		}
 		this.app.workspace.onLayoutReady(() => {
+			this.registerEvent(this.app.workspace.on('file-open', (file) => {
+				if (file && isCanvasFile(file.name)) this.lastCanvasPath = file.path;
+			}));
 			void this.contextIndex.start();
 			this.registerEvent(this.app.vault.on('create', (file) => this.contextIndex.onVaultFileChanged(file)));
 			this.registerEvent(this.app.vault.on('modify', (file) => this.contextIndex.onVaultFileChanged(file)));
@@ -99,6 +104,10 @@ export default class SovereignRouterPlugin extends Plugin {
 		this.settings.localContextMemoryBudget = Math.max(1_000, this.settings.localContextMemoryBudget ?? 4_000);
 		this.settings.automaticDocumentAuthoring = this.settings.automaticDocumentAuthoring ?? false;
 		this.settings.documentOutputRoot = this.settings.documentOutputRoot ?? '';
+		this.settings.canvasVisionModel = this.settings.canvasVisionModel ?? 'qwen/qwen3.7-plus';
+		this.settings.canvasMaxNodes = Math.max(1, this.settings.canvasMaxNodes ?? 250);
+		this.settings.canvasMaxImages = Math.max(1, this.settings.canvasMaxImages ?? 8);
+		this.settings.canvasMaxImageBytes = Math.max(1_000_000, this.settings.canvasMaxImageBytes ?? 6 * 1024 * 1024);
 		this.settings.workItemOutputRoot = this.settings.workItemOutputRoot ?? 'Sovereign/Tasks';
 	}
 
@@ -118,6 +127,15 @@ export default class SovereignRouterPlugin extends Plugin {
 
 	manualModelOptions(): string[] {
 		return Array.from(new Set([...this.settings.permittedExecutorModels, ...this.settings.customModelSlugs]));
+	}
+
+	activeCanvasFile(): TFile | null {
+		const active = this.app.workspace.getActiveFile();
+		if (active && isCanvasFile(active.name)) {
+			this.lastCanvasPath = active.path;
+			return active;
+		}
+		return this.lastCanvasPath ? this.app.vault.getFileByPath(this.lastCanvasPath) : null;
 	}
 
 	async refreshModelCatalog(): Promise<void> {

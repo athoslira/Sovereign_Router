@@ -60,9 +60,20 @@ Docling is a Python project, so it is not bundled into this TypeScript/mobile pl
 
 The plugin supports the file formats accepted by the picker, imports every supported document from a selected folder, limits individual uploads to 20 MB, and limits injected Markdown to protect context and cost. Source files are not copied, but converted Markdown from directly attached external documents is kept in the plugin's local context cache. For mobile devices, `localhost` means the phone/tablet itself; use a reachable HTTPS service or a local service on that device.
 
+## Canvas context and creative references
+
+Sovereign Router can read an Obsidian `.canvas` as structured local context. Open the Canvas and select **Canvas** in the composer, or drag a `.canvas` file into the composer. The plugin reads nodes, groups, spatial order, links, edges, labels, and vault-relative file references locally before any request is sent.
+
+- Text and linked notes become bounded Canvas context. Canvases are also included in the local vault index, so their structural context can be retrieved later on another device that synchronizes the vault.
+- Attached Canvas images are sent only with the message you submit, only up to the configured image count and size limits, and only to a permitted visual OpenRouter model. The default visual route is configurable in **Settings → Sovereign Router → Canvas context**.
+- Videos and audio remain explicit vault-relative references. A Hermes session or an approved media MCP can inspect them only when its own workspace and tools can access those files. The Obsidian plugin does not run FFmpeg, a terminal, or local media processing.
+- URLs in a Canvas are described as references but are never fetched automatically. Unsafe file paths and missing vault assets are ignored and reported as attachment limits.
+
+Use the Canvas attachment for moodboards, landing-page references, UI direction, design systems, and evidence-backed briefs. A normal chat can analyze its structure and images; select **Hermes Agent** for a task that also needs approved local media tools, terminal work, or production execution.
+
 ## Automatic vault context
 
-After Obsidian finishes loading, the plugin creates and incrementally maintains a local context index for supported text files in the current vault. The central registry is stored under the plugin's `context/` folder and is ignored by Git. It contains paths, modification markers, headings, and local search terms—not a second copy of vault text.
+After Obsidian finishes loading, the plugin creates and incrementally maintains a local context index for supported text files and Canvas structure in the current vault. The central registry is stored under the plugin's `context/` folder and is ignored by Git. It contains paths, modification markers, headings, and local search terms—not a second copy of vault text.
 
 When the Gatekeeper identifies that a request needs vault information, it returns a focused retrieval query. Only then does the plugin reread the most relevant current files, extracts bounded excerpts, and sends those excerpts to the executor. If the index is unavailable, stale, or finds no match, the executor falls back to answering without vault context.
 
@@ -70,7 +81,7 @@ External documents attached through Docling are cached as converted Markdown in 
 
 ## Local session memory and Graphify
 
-Sessions, compact summaries, pending Hermes proposals, approved memories, and deletion tombstones are stored only under the active vault's plugin data directory. Ending a session makes it read-only without deleting it; no memory is accepted until you explicitly approve or edit it in **Propose memory**. Attached document bodies and API keys are not written into session records.
+Sessions, compact summaries, pending Hermes proposals, approved memories, and deletion tombstones are stored only under the active vault's plugin data directory. Selecting the `×` beside a session ends it and removes its local session record; approved memories remain available. No memory is accepted until you explicitly approve or edit it in **Propose memory**. Attached document bodies and API keys are not written into session records.
 
 Graphify remains an optional local Hermes skill. Generate its `graph.json` separately, then set the vault-relative path in **Settings → Sovereign Router → Local context graph**. Sovereign Router only detects that generated file and tells Hermes it is available; it never starts Graphify, Python, a terminal, or an MCP server. If no graph exists, local session summaries and approved memories continue to work.
 
@@ -95,6 +106,7 @@ Sovereign Router can call tools from remote MCP servers through Streamable HTTP.
 
 - The plugin sends chat messages and selected skill content to OpenRouter when you submit a request.
 - Attached files are sent only to the Docling service URL you configure; their converted Markdown is then sent to OpenRouter with the chat request.
+- Canvas structure is read locally. Referenced Canvas images are sent only to the selected visual OpenRouter model when you attach that Canvas and submit a message; configured limits apply. Canvas URLs are never fetched automatically.
 - API keys are selected through Obsidian SecretStorage. `data.json` stores only their references.
 - Conversations, summaries, and approved memories remain in the current vault's local plugin data. The local context index persists file references and search terms; converted external attachments persist only in the local plugin cache until you clear them. The plugin collects no telemetry, edits no notes, and executes no remote code.
 - Remote skills are fetched as Markdown only from GitHub repositories you explicitly allow. They are never executed or saved to the vault.

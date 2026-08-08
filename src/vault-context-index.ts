@@ -1,5 +1,6 @@
 import { App, normalizePath, PluginManifest, TAbstractFile, TFile } from 'obsidian';
 import { isTextDocument } from './document-files';
+import { isCanvasFile, parseCanvas } from './canvas';
 import { contextTerms, extractContextExcerpt, rankContextEntries, type SearchableContextEntry } from './context-search';
 
 const REGISTRY_VERSION = 1;
@@ -156,7 +157,9 @@ export class VaultContextIndex {
 		const existing = this.registry.entries[id];
 		if (existing && existing.source === 'vault' && existing.modified === file.stat.mtime && existing.size === file.stat.size) return;
 		try {
-			const content = await this.app.vault.cachedRead(file);
+			const source = await this.app.vault.cachedRead(file);
+			const content = isCanvasFile(file.name) ? parseCanvas(source, file.name).markdown : source;
+			if (!content) return;
 			this.registry.entries[id] = {
 				id,
 				source: 'vault',
@@ -176,14 +179,16 @@ export class VaultContextIndex {
 		try {
 			if (entry.source === 'external') return entry.cachePath && await this.app.vault.adapter.exists(entry.cachePath) ? this.app.vault.adapter.read(entry.cachePath) : null;
 			const file = this.app.vault.getFileByPath(entry.path);
-			return file ? this.app.vault.cachedRead(file) : null;
+			if (!file) return null;
+			const content = await this.app.vault.cachedRead(file);
+			return isCanvasFile(file.name) ? parseCanvas(content, file.name).markdown : content;
 		} catch {
 			return null;
 		}
 	}
 
 	private shouldIndex(file: TFile): boolean {
-		return isTextDocument(file.name) && !file.path.startsWith(`${this.app.vault.configDir}/`) && !file.path.startsWith(this.directory);
+		return (isTextDocument(file.name) || isCanvasFile(file.name)) && !file.path.startsWith(`${this.app.vault.configDir}/`) && !file.path.startsWith(this.directory);
 	}
 
 	private async load(): Promise<void> {

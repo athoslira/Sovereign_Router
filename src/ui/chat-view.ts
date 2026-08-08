@@ -1,6 +1,8 @@
 import { ItemView, MarkdownRenderer, Notice, TFile, TFolder, WorkspaceLeaf } from 'obsidian';
 import { buildDocumentContext, limitDocumentContent, type AttachedDocument } from '../document-context';
 import { isSupportedDocument, isTextDocument, needsDoclingConversion } from '../document-files';
+import { isCanvasFile, parseCanvas } from '../canvas';
+import { CanvasContextResolver, canvasMediaSummary, type ResolvedCanvasAsset } from '../canvas-context';
 import { convertWithDocling } from '../docling';
 import { HermesClient, HermesError } from '../hermes';
 import { loadMcpCatalog, parseMcpToolCalls, toExecutorTools, type McpCatalog } from '../mcp-tools';
@@ -8,7 +10,7 @@ import { canCallMcpTool } from '../mcp-policy';
 import type { McpToolCall } from '../mcp-types';
 import type SovereignRouterPlugin from '../main';
 import { modelLabel } from '../models';
-import { completeExecutor, OpenRouterError, routeWithGatekeeper, StreamingUnavailableError, streamExecutor } from '../openrouter';
+import { completeExecutor, OpenRouterError, routeWithGatekeeper, StreamingUnavailableError, streamExecutor, type VisualInput } from '../openrouter';
 import { fallbackRoute, selectRoute } from '../routing';
 import { SkillResolver } from '../skills';
 import type { ChatMessage, OpenRouterToolCall, RouteResult, SessionRuntime, SkillReference, Usage, VaultContextReference } from '../types';
@@ -38,12 +40,19 @@ interface AssistantElements {
 	metaEl: HTMLElement | null;
 }
 
+interface CanvasVisualSelection {
+	inputs: VisualInput[];
+	skipped: number;
+}
+
 interface ChatSession {
 	id: string;
 	number: number;
 	history: ChatMessage[];
 	messages: SessionDisplayMessage[];
 	documents: AttachedDocument[];
+	canvasAssets: ResolvedCanvasAsset[];
+	canvasDocumentIds: Map<string, string>;
 	selectedModel: string;
 	runtime: SessionRuntime;
 	resolvedRuntime: Exclude<SessionRuntime, 'auto'> | null;
@@ -107,6 +116,7 @@ export class SovereignRouterView extends ItemView {
 	private runtimeSelect!: HTMLSelectElement;
 	private mcpToggle!: HTMLInputElement;
 	private attachButton!: HTMLButtonElement;
+	private canvasButton!: HTMLButtonElement;
 	private folderButton!: HTMLButtonElement;
 	private sendButton!: HTMLButtonElement;
 	private cancelButton!: HTMLButtonElement;
@@ -167,7 +177,7 @@ export class SovereignRouterView extends ItemView {
 			attr: {
 				type: 'file',
 				multiple: 'true',
-				accept: '.pdf,.docx,.pptx,.xlsx,.odt,.ods,.odp,.html,.htm,.epub,.txt,.md,.csv,.png,.jpg,.jpeg,.tiff',
+				accept: '.canvas,.pdf,.docx,.pptx,.xlsx,.odt,.ods,.odp,.html,.htm,.epub,.txt,.md,.csv,.png,.jpg,.jpeg,.tiff',
 			},
 		});
 		this.inputEl = composer.createEl('textarea', {
@@ -176,6 +186,7 @@ export class SovereignRouterView extends ItemView {
 		});
 		const actions = composer.createDiv({ cls: 'sr-actions' });
 		this.attachButton = actions.createEl('button', { text: 'Attach', cls: 'sr-button', attr: { title: 'Attach a document' } });
+		this.canvasButton = actions.createEl('button', { text: 'Canvas', cls: 'sr-button', attr: { title: 'Attach the active Canvas from this vault' } });
 		this.folderButton = actions.createEl('button', { text: 'Vault folder', cls: 'sr-button', attr: { title: 'Attach files from a vault folder' } });
 		this.cancelButton = actions.createEl('button', { text: 'Cancel', cls: 'sr-button sr-cancel', attr: { title: 'Cancel the active request' } });
 		this.sendButton = actions.createEl('button', { text: 'Send ↵', cls: 'sr-button sr-send', attr: { title: 'Send message (Enter)' } });
@@ -189,10 +200,18 @@ export class SovereignRouterView extends ItemView {
 		this.registerDomEvent(this.sendButton, 'click', () => void this.sendMessage());
 		this.registerDomEvent(this.cancelButton, 'click', () => void this.cancelActiveRequest());
 		this.registerDomEvent(this.attachButton, 'click', () => this.fileInput.click());
+		this.registerDomEvent(this.canvasButton, 'click', () => void this.attachActiveCanvas());
 		this.registerDomEvent(this.folderButton, 'click', () => this.openFolderPicker());
 		this.registerDomEvent(this.fileInput, 'change', () => {
-			if (this.fileInput.files) void this.attachDocuments(this.fileInput.files);
+			if (this.fileInput.files) void this.attachSelectedFiles(Array.from(this.fileInput.files));
 		});
+		this.registerDomEvent(composer, 'dragover', (event: DragEvent) => {
+			if (!event.dataTransfer) return;
+			event.preventDefault();
+			composer.addClass('is-dragging');
+		});
+		this.registerDomEvent(composer, 'dragleave', () => composer.removeClass('is-dragging'));
+		this.registerDomEvent(composer, 'drop', (event: DragEvent) => void this.handleComposerDrop(event, composer));
 		this.registerDomEvent(this.modelSelect, 'change', () => {
 			const session = this.activeSession;
 			if (!session.model) session.selectedModel = this.modelSelect.value;
@@ -241,6 +260,8 @@ export class SovereignRouterView extends ItemView {
 			history: [],
 			messages: [],
 			documents: [],
+			canvasAssets: [],
+			canvasDocumentIds: new Map(),
 			selectedModel: '',
 			runtime: 'auto',
 			resolvedRuntime: null,
@@ -361,7 +382,95 @@ export class SovereignRouterView extends ItemView {
 		new VaultFolderPicker(this.app, (folder) => void this.attachVaultFolder(folder, session)).open();
 	}
 
-	private async attachDocuments(files: FileList): Promise<void> {
+	private async attachActiveCanvas(): Promise<void> {
+		const session = this.activeSession;
+		if (!this.canInteract(session)) return;
+		const file = this.plugin.activeCanvasFile();
+		if (!file || !isCanvasFile(file.name)) {
+			new Notice('Open a Canvas in this vault, then select Canvas to attach it. You can also drop a .canvas file here.');
+			return;
+		}
+		await this.attachVaultCanvas(file, session);
+	}
+
+	private async handleComposerDrop(event: DragEvent, composer: HTMLElement): Promise<void> {
+		event.preventDefault();
+		composer.removeClass('is-dragging');
+		const session = this.activeSession;
+		if (!this.canInteract(session)) return;
+		const transfer = event.dataTransfer;
+		if (!transfer) return;
+		const files = Array.from(transfer.files);
+		if (files.length) {
+			await this.attachSelectedFiles(files);
+			return;
+		}
+		const text = [transfer.getData('text/uri-list'), transfer.getData('text/plain')].find(Boolean);
+		const path = this.vaultPathFromDrop(text || '');
+		const file = path ? this.app.vault.getFileByPath(path) : null;
+		if (file && isCanvasFile(file.name)) await this.attachVaultCanvas(file, session);
+		else new Notice('Drop a .canvas file, or open the Canvas and select the Canvas button.');
+	}
+
+	private vaultPathFromDrop(value: string): string | null {
+		const wikilink = value.match(/\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/)?.[1];
+		const candidate = (wikilink || value.split(/\r?\n/)[0] || '').trim().replace(/^file:\/\//i, '');
+		if (!candidate || candidate.includes('://') || candidate.startsWith('/') || /^[A-Za-z]:/.test(candidate) || candidate.split(/[\\/]/).some((part) => part === '..')) return null;
+		return decodeURIComponent(candidate).replace(/\\/g, '/');
+	}
+
+	private async attachSelectedFiles(files: File[]): Promise<void> {
+		for (const file of files.filter((item) => isCanvasFile(item.name))) await this.attachUploadedCanvas(file);
+		const documents = files.filter((item) => !isCanvasFile(item.name));
+		if (documents.length) await this.attachDocuments(documents);
+		this.fileInput.value = '';
+	}
+
+	private async attachVaultCanvas(file: TFile, session: ChatSession): Promise<void> {
+		if (!this.canInteract(session)) return;
+		session.isConvertingDocument = true;
+		session.pendingDocumentNames = [file.name];
+		session.attachmentError = null;
+		this.renderAttachments();
+		this.refreshSessionUi(session, 'Reading Canvas...');
+		try {
+			const attachment = await new CanvasContextResolver(this.app, this.plugin.settings.canvasMaxNodes).resolve(file);
+			session.documents.push(attachment.document);
+			session.canvasDocumentIds.set(attachment.document.name, attachment.id);
+			session.canvasAssets.push(...attachment.assets);
+			session.attachmentsExpanded = true;
+			if (attachment.warnings.length) new Notice(`Canvas attached with limits: ${attachment.warnings[0]}`);
+			else new Notice(`${file.name} attached: ${attachment.assets.length} referenced assets detected.`);
+		} catch (error) {
+			session.attachmentError = `Could not attach ${file.name}: ${error instanceof Error ? error.message : 'invalid Canvas'}`;
+			new Notice(session.attachmentError);
+		} finally {
+			session.pendingDocumentNames = [];
+			session.isConvertingDocument = false;
+			if (this.isActive(session)) {
+				this.renderAttachments();
+				this.refreshSessionUi(session);
+			}
+		}
+	}
+
+	private async attachUploadedCanvas(file: File): Promise<void> {
+		const session = this.activeSession;
+		if (!this.canInteract(session)) return;
+		try {
+			const parsed = parseCanvas(await file.text(), file.name, this.plugin.settings.canvasMaxNodes);
+			if (!parsed.markdown) throw new Error(parsed.warnings[0] || 'invalid Canvas');
+			const limited = limitDocumentContent(parsed.markdown);
+			session.documents.push({ name: `Canvas: ${file.name} · ${parsed.nodeCount} nodes · references unavailable outside the vault`, markdown: limited.content, truncated: limited.truncated });
+			session.attachmentsExpanded = true;
+			this.renderAttachments();
+			new Notice(`${file.name} attached structurally. Open the Canvas inside this vault to include its referenced assets.`);
+		} catch (error) {
+			new Notice(`Could not attach ${file.name}: ${error instanceof Error ? error.message : 'invalid Canvas'}`);
+		}
+	}
+
+	private async attachDocuments(files: File[]): Promise<void> {
 		const session = this.activeSession;
 		if (!this.canInteract(session)) return;
 		if (!this.plugin.settings.doclingServiceUrl) {
@@ -545,6 +654,14 @@ export class SovereignRouterView extends ItemView {
 			const localContext = await this.localContextFor(session, question);
 			const authoringInstruction = this.plugin.settings.automaticDocumentAuthoring && isDocumentRequest(question) ? documentAuthoringInstruction() : null;
 			const documentContext = [attachedContext, vaultContext, localContext, authoringInstruction].filter((value): value is string => Boolean(value)).join('\n\n---\n\n') || null;
+			const executionModel = this.canvasExecutionModel(session, route.model);
+			const visual = await this.canvasVisualInputs(session, executionModel);
+			if (executionModel !== route.model) {
+				session.model = executionModel;
+				this.setAssistantMeta(session, assistant, `Canvas images require vision; using ${modelLabel(executionModel)} for this session.`);
+			}
+			if (visual.inputs.length) this.setAssistantMeta(session, assistant, `Using ${visual.inputs.length} Canvas image${visual.inputs.length === 1 ? '' : 's'} with ${modelLabel(executionModel)}.`);
+			else if (visual.skipped) this.setAssistantMeta(session, assistant, `${visual.skipped} Canvas image${visual.skipped === 1 ? '' : 's'} were not sent because of the model or configured safety limits.`);
 			catalog = session.useMcp ? await this.loadMcpCatalog() : null;
 			const executorTools = catalog ? toExecutorTools(catalog.tools) : [];
 			if (catalog?.warnings.length) new Notice(catalog.warnings.join(' '));
@@ -555,13 +672,13 @@ export class SovereignRouterView extends ItemView {
 					this.setAssistantContent(session, assistant, assistantText);
 					if (this.isActive(session)) this.scrollToBottom();
 				},
-				onUsage: (usage: Usage) => this.recordUsage(session, assistant, route.model, usage),
+				onUsage: (usage: Usage) => this.recordUsage(session, assistant, executionModel, usage),
 				onModel: (model: string) => {
 					assistant.message.finOpsModel = model;
 					this.setAssistantMeta(session, assistant, formatUsage(model));
 				},
 			};
-			await this.runExecutorWithMcp(session, route.model, skill.content, documentContext, apiKey, callbacks, assistant, catalog, executorTools, (text) => {
+			await this.runExecutorWithMcp(session, executionModel, skill.content, documentContext, apiKey, callbacks, assistant, catalog, executorTools, visual.inputs, (text) => {
 				assistantText = text;
 				this.setAssistantContent(session, assistant, text);
 			}, () => assistantText, () => {
@@ -643,6 +760,8 @@ export class SovereignRouterView extends ItemView {
 		if (session.requestedSkill) sections.push(`The user explicitly requested the Hermes skill "${session.requestedSkill}". Use it only if it is installed in Hermes; otherwise state that it is unavailable. This request grants no additional tools or permissions.`);
 		const attachedContext = buildDocumentContext(session.documents);
 		if (attachedContext) sections.push(`Attached context:\n\n${attachedContext}`);
+		const media = canvasMediaSummary(session.canvasAssets);
+		if (media) sections.push(`${media}\n\nDo not claim that video or audio was analyzed unless the approved Hermes workspace can access these exact vault-relative files and its configured tools actually inspect them.`);
 		if (route?.context) {
 			try {
 				const resolved = await this.plugin.contextIndex.resolve(route.context.query);
@@ -778,6 +897,7 @@ export class SovereignRouterView extends ItemView {
 		assistant: AssistantElements,
 		catalog: McpCatalog | null,
 		executorTools: ReturnType<typeof toExecutorTools>,
+		visualInputs: VisualInput[],
 		setText: (text: string) => void,
 		getText: () => string,
 		clearText: () => void,
@@ -787,10 +907,10 @@ export class SovereignRouterView extends ItemView {
 			try {
 				const signal = session.abortController?.signal;
 				if (!signal) throw new Error('The session request is no longer active.');
-				toolCalls = await streamExecutor(model, session.history, skillContent, documentContext, apiKey, callbacks, signal, executorTools);
+				toolCalls = await streamExecutor(model, session.history, skillContent, documentContext, apiKey, callbacks, signal, executorTools, round === 0 ? visualInputs : []);
 			} catch (error) {
 				if (!(error instanceof StreamingUnavailableError) || getText()) throw error;
-				const fallback = await completeExecutor(model, session.history, skillContent, documentContext, apiKey, executorTools);
+				const fallback = await completeExecutor(model, session.history, skillContent, documentContext, apiKey, executorTools, round === 0 ? visualInputs : []);
 				setText(fallback.content);
 				toolCalls = fallback.toolCalls;
 				if (fallback.usage) this.recordUsage(session, assistant, fallback.model, fallback.usage, 'non-streaming fallback');
@@ -898,7 +1018,14 @@ export class SovereignRouterView extends ItemView {
 			remove.disabled = !this.canInteract(session);
 			this.registerDomEvent(remove, 'click', () => {
 				if (!this.canInteract(session)) return;
-				session.documents.splice(index, 1);
+				const [removed] = session.documents.splice(index, 1);
+				if (removed) {
+					const canvasId = session.canvasDocumentIds.get(removed.name);
+					if (canvasId) {
+						session.canvasDocumentIds.delete(removed.name);
+						session.canvasAssets = session.canvasAssets.filter((asset) => asset.canvasId !== canvasId);
+					}
+				}
 				this.renderAttachments();
 			});
 		}
@@ -939,6 +1066,31 @@ export class SovereignRouterView extends ItemView {
 		if (message.role === 'user') return { bodyEl: messageEl.createDiv({ text: message.content, cls: 'sr-message-body' }), metaEl: null };
 		const metaEl = messageEl.createDiv({ text: message.meta || '', cls: 'sr-message-meta' });
 		return { bodyEl: messageEl.createDiv({ text: message.content, cls: 'sr-message-body' }), metaEl };
+	}
+
+	private canvasExecutionModel(session: ChatSession, routedModel: string): string {
+		if (!session.canvasAssets.some((asset) => asset.kind === 'image') || session.selectedModel) return routedModel;
+		const preferred = this.plugin.settings.canvasVisionModel;
+		return preferred && this.plugin.settings.permittedExecutorModels.includes(preferred) ? preferred : routedModel;
+	}
+
+	private async canvasVisualInputs(session: ChatSession, model: string): Promise<CanvasVisualSelection> {
+		const candidates = session.canvasAssets.filter((asset) => asset.kind === 'image');
+		if (!candidates.length || !this.modelSupportsImages(model)) return { inputs: [], skipped: candidates.length };
+		const resolver = new CanvasContextResolver(this.app, this.plugin.settings.canvasMaxNodes);
+		const inputs: VisualInput[] = [];
+		for (const asset of candidates.slice(0, this.plugin.settings.canvasMaxImages)) {
+			try {
+				const dataUrl = await resolver.imageDataUrl(asset, this.plugin.settings.canvasMaxImageBytes);
+				if (dataUrl) inputs.push({ name: asset.path, dataUrl });
+			} catch { /* Missing or unreadable Canvas images remain local and are omitted. */ }
+		}
+		return { inputs, skipped: candidates.length - inputs.length };
+	}
+
+	private modelSupportsImages(model: string): boolean {
+		const listed = this.plugin.settings.modelCatalog?.models.find((candidate) => candidate.id === model);
+		return !listed || listed.inputModalities.includes('image');
 	}
 
 	private handleCopyShortcut(event: KeyboardEvent): void {
@@ -1001,6 +1153,7 @@ export class SovereignRouterView extends ItemView {
 	private refreshSessionUi(session: ChatSession, actionLabel?: string): void {
 		if (!this.isActive(session)) return;
 		this.attachButton.setText(actionLabel || 'Attach');
+		this.canvasButton.setText(actionLabel || 'Canvas');
 		this.folderButton.setText(actionLabel || 'Vault folder');
 		this.renderSessionTabs();
 		this.setBusy();
@@ -1011,6 +1164,7 @@ export class SovereignRouterView extends ItemView {
 		const controlsDisabled = !this.canInteract(session);
 		this.sendButton.disabled = controlsDisabled;
 		this.attachButton.disabled = controlsDisabled;
+		this.canvasButton.disabled = controlsDisabled;
 		this.folderButton.disabled = controlsDisabled;
 		this.cancelButton.disabled = !session.abortController;
 		this.inputEl.disabled = controlsDisabled;
@@ -1061,7 +1215,7 @@ export class SovereignRouterView extends ItemView {
 			requestedSkill: record.requestedSkill ?? null,
 			history: record.messages.map((message) => ({ role: message.role, content: message.content })),
 			messages: record.messages.map((message) => ({ ...message })),
-			documents: [], abortController: null, hermesClient: null, hermesRunId: null,
+			documents: [], canvasAssets: [], canvasDocumentIds: new Map(), abortController: null, hermesClient: null, hermesRunId: null,
 			isConvertingDocument: false, attachmentsExpanded: false, pendingDocumentNames: [], attachmentError: null,
 		};
 	}

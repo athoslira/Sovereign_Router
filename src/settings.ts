@@ -31,6 +31,10 @@ export interface SovereignRouterSettings {
 	localContextMemoryBudget: number;
 	automaticDocumentAuthoring: boolean;
 	documentOutputRoot: string;
+	canvasVisionModel: string;
+	canvasMaxNodes: number;
+	canvasMaxImages: number;
+	canvasMaxImageBytes: number;
 	workItemOutputRoot: string;
 	mcpServers: McpServerConfig[];
 }
@@ -60,6 +64,10 @@ export const DEFAULT_SETTINGS: SovereignRouterSettings = {
 	localContextMemoryBudget: 4_000,
 	automaticDocumentAuthoring: false,
 	documentOutputRoot: '',
+	canvasVisionModel: 'qwen/qwen3.7-plus',
+	canvasMaxNodes: 250,
+	canvasMaxImages: 8,
+	canvasMaxImageBytes: 6 * 1024 * 1024,
 	workItemOutputRoot: 'Sovereign/Tasks',
 	mcpServers: [],
 };
@@ -146,6 +154,12 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 		this.addTextSetting('Approved memory budget (characters)', 'Maximum approved-memory context supplied per request.', String(this.plugin.settings.localContextMemoryBudget), async (value) => { this.plugin.settings.localContextMemoryBudget = positiveInteger(value, 4_000); });
 		new Setting(containerEl).setName('Automatic vault writing').setDesc('When enabled, document-oriented requests may create or update validated Markdown notes after the response. Ordinary chat never writes notes.').addToggle((toggle) => toggle.setValue(this.plugin.settings.automaticDocumentAuthoring).onChange(async (value) => { this.plugin.settings.automaticDocumentAuthoring = value; await this.plugin.saveSettings(); }));
 		this.addTextSetting('Document output root', 'Optional vault-relative folder that contains automatic document output. Leave blank to let validated document plans select an existing vault folder.', this.plugin.settings.documentOutputRoot, async (value) => { this.plugin.settings.documentOutputRoot = value.replace(/^[/\\]+/, ''); });
+		new Setting(containerEl).setName('Canvas context').setHeading();
+		containerEl.createEl('p', { text: 'Canvas structure is read locally. Images are sent only when you attach a Canvas and send a message with the configured permitted vision model. Video and audio remain explicit references for Hermes or an approved media MCP.' });
+		this.addTextSetting('Canvas vision model', 'Permitted OpenRouter model used when an attached Canvas contains images and the routed model is not visual. Leave blank to keep the routed model.', this.plugin.settings.canvasVisionModel, async (value) => { this.plugin.settings.canvasVisionModel = value; });
+		this.addTextSetting('Canvas node limit', 'Maximum nodes read from one Canvas.', String(this.plugin.settings.canvasMaxNodes), async (value) => { this.plugin.settings.canvasMaxNodes = positiveInteger(value, 250); });
+		this.addTextSetting('Canvas image limit', 'Maximum Canvas images sent with one message.', String(this.plugin.settings.canvasMaxImages), async (value) => { this.plugin.settings.canvasMaxImages = positiveInteger(value, 8); });
+		this.addTextSetting('Canvas image size limit (MB)', 'Maximum size of each Canvas image sent to a visual model.', String(Math.round(this.plugin.settings.canvasMaxImageBytes / (1024 * 1024))), async (value) => { this.plugin.settings.canvasMaxImageBytes = positiveInteger(value, 6) * 1024 * 1024; });
 		new Setting(containerEl).setName('Sovereign work items').setHeading();
 		containerEl.createEl('p', { text: 'Work items keep requirements, plans, execution evidence, and verification results in vault Markdown. Terminal, Git, and worktree operations stay with Hermes or a future VS Code adapter.' });
 		this.addTextSetting('Work item output root', 'Vault-relative folder for requirement, plan, execution, and evidence artifacts.', this.plugin.settings.workItemOutputRoot, async (value) => { this.plugin.settings.workItemOutputRoot = value.replace(/^[/\\]+/, '') || 'Sovereign/Tasks'; });

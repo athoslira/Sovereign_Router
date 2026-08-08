@@ -1,5 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { buildDocumentContext, limitDocumentContent, MAX_DOCUMENT_CHARS } from '../src/document-context';
+import { parseCanvas } from '../src/canvas';
 import { isSecureOrLocalHttpEndpoint } from '../src/endpoint-policy';
 import { isSupportedDocument, isTextDocument, needsDoclingConversion } from '../src/document-files';
 import { contextTerms, extractContextExcerpt, rankContextEntries } from '../src/context-search';
@@ -46,6 +47,10 @@ const settings: SovereignRouterSettings = {
 	localContextMemoryBudget: 4_000,
 	automaticDocumentAuthoring: false,
 	documentOutputRoot: '',
+	canvasVisionModel: 'qwen/qwen3.7-plus',
+	canvasMaxNodes: 250,
+	canvasMaxImages: 8,
+	canvasMaxImageBytes: 6 * 1024 * 1024,
 	workItemOutputRoot: 'Sovereign/Tasks',
 	mcpServers: [],
 };
@@ -237,6 +242,23 @@ run('parses named skill requests and safe document operations', () => {
 	assert.equal(operation?.path, 'Projects/Plan.md');
 	assert.equal(safeDocumentPath('../secret.md'), false);
 	assert.equal(safeDocumentPath('.obsidian/config.md'), false);
+});
+
+run('parses Canvas structure without following unsafe references', () => {
+	const canvas = parseCanvas(JSON.stringify({
+		nodes: [
+			{ id: 'group', type: 'group', label: 'Hero', x: 0, y: 0, width: 500, height: 300 },
+			{ id: 'text', type: 'text', text: 'Launch a premium landing page', x: 20, y: 20 },
+			{ id: 'image', type: 'file', file: 'References/hero.png', x: 40, y: 80 },
+			{ id: 'video', type: 'file', file: 'References/demo.mp4', x: 250, y: 80 },
+			{ id: 'unsafe', type: 'file', file: '../secret.png' },
+		],
+		edges: [{ fromNode: 'text', toNode: 'image', label: 'visual direction' }],
+	}), 'Landing.canvas');
+	assert.match(canvas.markdown, /Launch a premium landing page/);
+	assert.match(canvas.markdown, /visual direction/);
+	assert.equal(canvas.assets.map((asset) => asset.kind).join(','), 'image,video');
+	assert.equal(canvas.warnings.some((warning) => warning.includes('unsafe')), true);
 });
 
 run('keeps automatic document output inside the vault', () => {
