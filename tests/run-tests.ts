@@ -20,6 +20,7 @@ import { safeVaultRelativeRoot, vaultOutputPath } from '../src/vault-path-policy
 import { extractRequestedSkill } from '../src/requested-skill';
 import { canTransitionWorkItem, createWorkEvent, plannerPrompt, safeWorkOutputRoot, safeWorkPathSegment, verifierPrompt, workArtifactPath, type WorkItem } from '../src/work-protocol';
 import { SseParser } from '../src/sse';
+import { serializeMcpToolResult, serializeStructuredContext } from '../src/context-serialization';
 import type { SovereignRouterSettings } from '../src/settings';
 
 const settings: SovereignRouterSettings = {
@@ -306,6 +307,24 @@ run('parses Canvas structure without following unsafe references', () => {
 	assert.match(canvas.markdown, /visual direction/);
 	assert.equal(canvas.assets.map((asset) => asset.kind).join(','), 'image,video');
 	assert.equal(canvas.warnings.some((warning) => warning.includes('unsafe')), true);
+	assert.equal(canvas.structured?.fileNodes.some((node) => node.path.includes('secret')), false);
+});
+
+run('uses TOON only when uniform structured context is smaller than its fallback', () => {
+	const records = {
+		leads: Array.from({ length: 20 }, (_, index) => ({
+			name: `Lead ${index + 1}`,
+			status: index % 2 === 0 ? 'qualified' : 'pending',
+			source: 'directory',
+		})),
+	};
+	const compact = serializeStructuredContext(records, 'test records', JSON.stringify(records, null, 2));
+	assert.equal(compact.format, 'toon');
+	assert.match(compact.content, /```toon/);
+	const irregular = serializeStructuredContext({ nested: { value: { one: true, two: { three: false } } } }, 'test data');
+	assert.equal(irregular.format, 'original');
+	const mcp = serializeMcpToolResult(JSON.stringify(records));
+	assert.equal(mcp.format, 'toon');
 });
 
 run('keeps automatic document output inside the vault', () => {

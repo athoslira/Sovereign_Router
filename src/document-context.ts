@@ -2,6 +2,7 @@ export interface AttachedDocument {
 	name: string;
 	markdown: string;
 	truncated: boolean;
+	contextFormat?: 'toon';
 }
 
 export const MAX_DOCUMENT_CHARS = 100_000;

@@ -12,10 +12,21 @@ export interface CanvasAsset {
 
 export interface ParsedCanvas {
 	markdown: string;
+	structured: CanvasStructuredContext | null;
 	assets: CanvasAsset[];
 	warnings: string[];
 	nodeCount: number;
 	edgeCount: number;
+}
+
+export interface CanvasStructuredContext {
+	canvas: { name: string; nodeCount: number; edgeCount: number };
+	groups: Array<{ id: string; label: string; color: string | null }>;
+	textNodes: Array<{ id: string; text: string; groups: string | null }>;
+	fileNodes: Array<{ id: string; path: string; kind: CanvasAssetKind; label: string; groups: string | null }>;
+	links: Array<{ id: string; label: string; url: string | null; groups: string | null }>;
+	connections: Array<{ from: string; to: string; label: string | null }>;
+	warnings: string[];
 }
 
 interface CanvasNode {
@@ -104,7 +115,7 @@ function withinGroup(node: CanvasNode, group: CanvasNode): boolean {
 /** Parses Canvas JSON into bounded, readable local context. It never reads linked files or fetches URLs. */
 export function parseCanvas(source: string, name: string, maximumNodes = 250): ParsedCanvas {
 	let root: Record<string, unknown> | null;
-	try { root = record(JSON.parse(source)); } catch { return { markdown: '', assets: [], warnings: ['The Canvas file is not valid JSON.'], nodeCount: 0, edgeCount: 0 }; }
+	try { root = record(JSON.parse(source)); } catch { return { markdown: '', structured: null, assets: [], warnings: ['The Canvas file is not valid JSON.'], nodeCount: 0, edgeCount: 0 }; }
 	const allNodes = Array.isArray(root?.nodes) ? root.nodes.flatMap((item) => {
 		const node = parseNode(item);
 		return node ? [node] : [];
@@ -119,6 +130,9 @@ export function parseCanvas(source: string, name: string, maximumNodes = 250): P
 	const byId = new Map(nodes.map((node) => [node.id, node]));
 	const groups = nodes.filter((node) => node.type === 'group');
 	const assets: CanvasAsset[] = [];
+	const textNodes: CanvasStructuredContext['textNodes'] = [];
+	const fileNodes: CanvasStructuredContext['fileNodes'] = [];
+	const links: CanvasStructuredContext['links'] = [];
 	const lines = [`# Canvas context: ${name}`, '', `Structure: ${allNodes.length} nodes · ${edges.length} connections.`];
 	if (groups.length) {
 		lines.push('', '## Groups');
@@ -128,9 +142,18 @@ export function parseCanvas(source: string, name: string, maximumNodes = 250): P
 	for (const node of [...nodes].sort((left, right) => (left.y ?? 0) - (right.y ?? 0) || (left.x ?? 0) - (right.x ?? 0))) {
 		const membership = groups.filter((group) => group.id !== node.id && withinGroup(node, group)).map(nodeLabel);
 		const groupSuffix = membership.length ? ` · group: ${membership.join(', ')}` : '';
-		if (node.type === 'text') lines.push(`- Text: ${clipped(node.text)}${groupSuffix}`);
+		const groupNames = membership.join(', ') || null;
+		if (node.type === 'text') {
+			const text = clipped(node.text);
+			lines.push(`- Text: ${text}${groupSuffix}`);
+			textNodes.push({ id: node.id, text, groups: groupNames });
+		}
 		else if (node.type === 'group') continue;
-		else if (node.type === 'link') lines.push(`- External link: ${nodeLabel(node)}${node.url ? ` → ${node.url}` : ''}${groupSuffix}`);
+		else if (node.type === 'link') {
+			const label = nodeLabel(node);
+			lines.push(`- External link: ${label}${node.url ? ` → ${node.url}` : ''}${groupSuffix}`);
+			links.push({ id: node.id, label, url: node.url ?? null, groups: groupNames });
+		}
 		else {
 			const path = node.file || '';
 			if (!isSafeRelativePath(path)) {
@@ -140,6 +163,7 @@ export function parseCanvas(source: string, name: string, maximumNodes = 250): P
 			const kind = canvasAssetKind(path);
 			assets.push({ id: `asset-${node.id}`, nodeId: node.id, path, kind, label: nodeLabel(node) });
 			lines.push(`- ${kind === 'note' ? 'Vault note' : `${kind[0]!.toUpperCase()}${kind.slice(1)} asset`}: [[${path}]]${groupSuffix}`);
+			fileNodes.push({ id: node.id, path, kind, label: nodeLabel(node), groups: groupNames });
 		}
 	}
 	const validEdges = edges.filter((edge) => byId.has(edge.fromNode) && byId.has(edge.toNode));
@@ -156,5 +180,24 @@ export function parseCanvas(source: string, name: string, maximumNodes = 250): P
 		lines.push('', `Assets: ${Object.entries(counts).filter(([, count]) => count > 0).map(([kind, count]) => `${count} ${kind}`).join(', ')}.`);
 	}
 	if (warnings.length) lines.push('', '## Limits and warnings', ...warnings.map((warning) => `- ${warning}`));
-	return { markdown: lines.join('\n'), assets, warnings, nodeCount: allNodes.length, edgeCount: edges.length };
+	return {
+		markdown: lines.join('\n'),
+		structured: {
+			canvas: { name, nodeCount: allNodes.length, edgeCount: edges.length },
+			groups: groups.map((group) => ({ id: group.id, label: nodeLabel(group), color: group.color ?? null })),
+			textNodes,
+			fileNodes,
+			links,
+			connections: validEdges.slice(0, 300).flatMap((edge) => {
+				const from = byId.get(edge.fromNode);
+				const to = byId.get(edge.toNode);
+				return from && to ? [{ from: nodeLabel(from), to: nodeLabel(to), label: edge.label ?? null }] : [];
+			}),
+			warnings,
+		},
+		assets,
+		warnings,
+		nodeCount: allNodes.length,
+		edgeCount: edges.length,
+	};
 }

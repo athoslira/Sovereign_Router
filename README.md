@@ -66,7 +66,7 @@ The plugin supports the file formats accepted by the picker, imports every suppo
 
 Sovereign Router can read an Obsidian `.canvas` as structured local context. Open the Canvas and select **Canvas** in the composer, or drag a `.canvas` file into the composer. The plugin reads nodes, groups, spatial order, links, edges, labels, and vault-relative file references locally before any request is sent.
 
-- Text and linked notes become bounded Canvas context. Canvases are also included in the local vault index, so their structural context can be retrieved later on another device that synchronizes the vault.
+- Text and linked notes become bounded Canvas context. For sufficiently regular Canvas structures, the plugin locally uses TOON encoding only when it makes the complete context block smaller; prose and irregular structures stay as Markdown. Canvases are also included in the local vault index, so their structural context can be retrieved later on another device that synchronizes the vault.
 - Attached Canvas images are sent only with the message you submit, only up to the configured image count and size limits, and only to a permitted visual OpenRouter model. The default visual route is configurable in **Settings → Sovereign Router → Canvas context**.
 - Videos and audio remain explicit vault-relative references. A Hermes session or an approved media MCP can inspect them only when its own workspace and tools can access those files. The Obsidian plugin does not run FFmpeg, a terminal, or local media processing.
 - URLs in a Canvas are described as references but are never fetched automatically. Unsafe file paths and missing vault assets are ignored and reported as attachment limits.
@@ -101,7 +101,7 @@ Sovereign Router can call tools from remote MCP servers through Streamable HTTP.
 
 - The plugin accepts HTTPS endpoints, plus `http://localhost` for a locally running server. It does not spawn programs or use the desktop-only stdio transport.
 - Tools marked read-only by their server can run during an MCP-enabled chat. Write tools are off by default; enabling them still presents the arguments and requires explicit confirmation for every call.
-- The plugin fetches the server's tool list only for an MCP-enabled message. MCP session details, tool results, and chat history remain only in the open panel.
+- The plugin fetches the server's tool list only for an MCP-enabled message. Uniform structured tool results may be locally encoded as TOON when the complete model-facing block is smaller; protocol requests and tool arguments remain JSON. MCP session details, tool results, and chat history remain only in the open panel.
 - [`mcp-connectors/`](mcp-connectors/README.md) contains a small generator for a standalone Streamable HTTP connector. Deploy it behind HTTPS before using it from a mobile device.
 
 ## Privacy and security

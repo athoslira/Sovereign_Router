@@ -23,6 +23,7 @@ import { confirmMemoryProposal, MemoryReviewModal } from './memory-review-modal'
 import { extractRequestedSkill } from '../requested-skill';
 import { documentAuthoringInstruction, isDocumentRequest, parseDocumentOperation, stripDocumentOperation } from '../document-authoring';
 import { VaultDocumentWriter } from '../vault-document-writer';
+import { serializeMcpToolResult } from '../context-serialization';
 
 export const VIEW_TYPE_SOVEREIGN_ROUTER = 'sovereign-router-chat';
 
@@ -641,6 +642,9 @@ export class SovereignRouterView extends ItemView {
 			const skill = await new SkillResolver(this.app, this.plugin.settings).resolve(route.skill);
 			if (skill.note) this.setAssistantMeta(session, assistant, `${route.note ? `${route.note} ` : ''}${skill.note}`);
 			const attachedContext = buildDocumentContext(session.documents);
+			if (session.documents.some((document) => document.contextFormat === 'toon')) {
+				this.setAssistantMeta(session, assistant, 'Using compact TOON encoding for structured Canvas context.');
+			}
 			let vaultContext: string | null = null;
 			if (route.context) {
 				try {
@@ -974,7 +978,7 @@ export class SovereignRouterView extends ItemView {
 		const client = catalog.clients.get(server.id);
 		if (!client) return 'The MCP connection is unavailable.';
 		try {
-			return await client.callTool(call.tool.name, call.arguments, session.abortController?.signal);
+			return serializeMcpToolResult(await client.callTool(call.tool.name, call.arguments, session.abortController?.signal)).content;
 		} catch (error) {
 			return error instanceof Error ? `MCP tool error: ${error.message}` : 'MCP tool failed.';
 		}

@@ -2,6 +2,7 @@ import { App, TFile } from 'obsidian';
 import { limitDocumentContent, type AttachedDocument } from './document-context';
 import { isTextDocument } from './document-files';
 import { isCanvasImage, parseCanvas, type CanvasAsset, type CanvasAssetKind } from './canvas';
+import { serializeStructuredContext } from './context-serialization';
 
 const MAX_LINKED_NOTES = 8;
 const MAX_LINKED_NOTE_CHARS = 12_000;
@@ -43,10 +44,16 @@ export class CanvasContextResolver {
 			}
 		}
 		if (parsed.assets.filter((asset) => asset.kind === 'note').length > linkedNotes.length) warnings.push('Some linked notes were omitted by the Canvas context limit.');
-		const limited = limitDocumentContent([parsed.markdown, ...linkedNotes].join('\n\n---\n\n'));
+		const serialized = parsed.structured ? serializeStructuredContext(parsed.structured, 'Canvas structure', parsed.markdown) : { content: parsed.markdown, format: 'original' as const };
+		const limited = limitDocumentContent([serialized.content, ...linkedNotes].join('\n\n---\n\n'));
 		return {
 			id,
-			document: { name: `Canvas: ${file.name} · ${parsed.nodeCount} nodes · ${assets.filter((asset) => asset.kind === 'image').length} images`, markdown: limited.content, truncated: limited.truncated },
+			document: {
+				name: `Canvas: ${file.name} · ${parsed.nodeCount} nodes · ${assets.filter((asset) => asset.kind === 'image').length} images`,
+				markdown: limited.content,
+				truncated: limited.truncated,
+				...(serialized.format === 'toon' ? { contextFormat: 'toon' as const } : {}),
+			},
 			assets,
 			warnings,
 		};
