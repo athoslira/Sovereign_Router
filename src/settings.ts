@@ -1,8 +1,8 @@
 import { App, Notice, PluginSettingTab, SecretComponent, Setting } from 'obsidian';
 import type SovereignRouterPlugin from './main';
 import { DEFAULT_EXECUTOR_MODELS } from './models';
-import { DEFAULT_HERMES_MODEL_ALIAS, DEFAULT_HERMES_MODEL_ROUTES, formatHermesModelRoutes, parseHermesModelRoutes, type HermesModelRoute } from './hermes-models';
-import type { ModelCatalogSnapshot } from './model-catalog';
+import { DEFAULT_HERMES_MODEL_ALIAS, DEFAULT_HERMES_MODEL_ROUTES, type HermesModelRoute } from './hermes-models';
+import type { ModelCatalogRefreshHealth, ModelCatalogSnapshot } from './model-catalog';
 import type { McpServerConfig } from './mcp-types';
 import { isAllowedMcpEndpoint } from './mcp-policy';
 
@@ -13,6 +13,7 @@ export interface SovereignRouterSettings {
 	permittedExecutorModels: string[];
 	customModelSlugs: string[];
 	modelCatalog: ModelCatalogSnapshot | null;
+	modelCatalogHealth: ModelCatalogRefreshHealth | null;
 	modelCatalogRefreshDays: number;
 	modelCatalogVersion: number;
 	routingInstruction: string;
@@ -25,6 +26,8 @@ export interface SovereignRouterSettings {
 	enableHermesAutoRouting: boolean;
 	hermesModelRoutes: HermesModelRoute[];
 	hermesDefaultModelAlias: string;
+	hermesModelRoutesUpdatedAt: number | null;
+	hermesModelRoutesError: string | null;
 	hermesPermittedProviderOverrides: string[];
 	graphifyGraphPath: string;
 	localContextSummaryBudget: number;
@@ -46,6 +49,7 @@ export const DEFAULT_SETTINGS: SovereignRouterSettings = {
 	permittedExecutorModels: DEFAULT_EXECUTOR_MODELS,
 	customModelSlugs: [],
 	modelCatalog: null,
+	modelCatalogHealth: null,
 	modelCatalogRefreshDays: 15,
 	modelCatalogVersion: 1,
 	routingInstruction: 'Choose the best permitted executor model and, when useful, one available skill. Return only the required JSON object.',
@@ -58,6 +62,8 @@ export const DEFAULT_SETTINGS: SovereignRouterSettings = {
 	enableHermesAutoRouting: false,
 	hermesModelRoutes: DEFAULT_HERMES_MODEL_ROUTES,
 	hermesDefaultModelAlias: DEFAULT_HERMES_MODEL_ALIAS,
+	hermesModelRoutesUpdatedAt: null,
+	hermesModelRoutesError: null,
 	hermesPermittedProviderOverrides: [],
 	graphifyGraphPath: '.sovereign-router/graphify-out/graph.json',
 	localContextSummaryBudget: 6_000,
@@ -95,8 +101,9 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 		this.addTextAreaSetting('Manual-only models', 'One OpenRouter model slug per line. These appear in the chat selector but are never selected automatically by the Gatekeeper.', this.plugin.settings.customModelSlugs.join('\n'), async (value) => { this.plugin.settings.customModelSlugs = splitLines(value); });
 		new Setting(containerEl).setName('Model catalog').setHeading();
 		const catalog = this.plugin.settings.modelCatalog;
+		const catalogHealth = this.plugin.settings.modelCatalogHealth;
 		const catalogDescription = catalog
-			? `${catalog.models.length} models cached from OpenRouter on ${new Date(catalog.fetchedAt).toLocaleString()}. Prices are reference prices only; response FinOps continues to use OpenRouter usage.cost.`
+			? `${catalog.models.length} models cached from OpenRouter on ${new Date(catalog.fetchedAt).toLocaleString()}. ${catalogHealth ? `Last ${catalogHealth.status} via ${catalogHealth.source}: +${catalogHealth.delta.added}, ~${catalogHealth.delta.changed}, -${catalogHealth.delta.removed}.` : 'No refresh health record yet.'} Prices are reference prices only; response FinOps continues to use OpenRouter usage.cost.`
 			: 'No catalog has been downloaded yet. Downloading it does not allow any model to be routed automatically.';
 		new Setting(containerEl).setName('OpenRouter model catalog').setDesc(catalogDescription).addButton((button) => button.setButtonText('Refresh catalog').onClick(async () => {
 			try {
@@ -107,7 +114,7 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 				new Notice(error instanceof Error ? error.message : 'Could not refresh the OpenRouter model catalog.');
 			}
 		}));
-		this.addTextSetting('Catalog refresh interval (days)', 'The plugin refreshes when it is open and the cache is older than this interval. Use the included Hermes job for unattended refreshes.', String(this.plugin.settings.modelCatalogRefreshDays), async (value) => {
+		this.addTextSetting('Catalog refresh interval (days)', 'The plugin refreshes while Obsidian is open when the cache is older than this interval. The status record shows success or failure of every local attempt.', String(this.plugin.settings.modelCatalogRefreshDays), async (value) => {
 			const days = Number.parseInt(value, 10);
 			this.plugin.settings.modelCatalogRefreshDays = Number.isFinite(days) && days > 0 ? days : 15;
 		});
@@ -139,8 +146,23 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 			this.plugin.settings.enableHermesAutoRouting = value;
 			await this.plugin.saveSettings();
 		}));
-		this.addTextAreaSetting('Hermes model routes', 'One approved alias and OpenRouter model slug per line: alias = provider/model. Configure the same aliases in Hermes before enabling automatic routing.', formatHermesModelRoutes(this.plugin.settings.hermesModelRoutes), async (value) => { this.plugin.settings.hermesModelRoutes = parseHermesModelRoutes(value); });
-		this.addTextSetting('Default Hermes model route', 'Used for a manually selected Hermes session and when the Gatekeeper cannot select a permitted Hermes route.', this.plugin.settings.hermesDefaultModelAlias, async (value) => { this.plugin.settings.hermesDefaultModelAlias = value; });
+		const routeSyncDescription = this.plugin.settings.hermesModelRoutesUpdatedAt
+			? `${this.plugin.settings.hermesModelRoutes.length} permitted routes synchronized from Hermes on ${new Date(this.plugin.settings.hermesModelRoutesUpdatedAt).toLocaleString()}.${this.plugin.settings.hermesModelRoutesError ? ` Last error: ${this.plugin.settings.hermesModelRoutesError}` : ''}`
+			: this.plugin.settings.hermesModelRoutesError
+				? `No successful synchronization yet. Last error: ${this.plugin.settings.hermesModelRoutesError}`
+				: 'Routes are discovered automatically from the configured Hermes API.';
+		new Setting(containerEl).setName('Hermes model routes').setDesc(routeSyncDescription).addButton((button) => button.setButtonText('Sync routes').onClick(async () => {
+			try {
+				button.setDisabled(true).setButtonText('Syncing...');
+				await this.plugin.refreshHermesModelRoutes();
+				new Notice('Hermes model routes synchronized.');
+				this.display();
+			} catch (error) {
+				new Notice(error instanceof Error ? error.message : 'Could not synchronize Hermes model routes.');
+				button.setDisabled(false).setButtonText('Sync routes');
+			}
+		}));
+		this.addTextSetting('Default Hermes model route', 'Used for a manually selected Hermes session and preserved automatically when Hermes changes an alias for the same underlying model.', this.plugin.settings.hermesDefaultModelAlias, async (value) => { this.plugin.settings.hermesDefaultModelAlias = value; });
 		this.addTextAreaSetting('Permitted Hermes provider overrides', 'One configured Hermes provider profile per line. Leave empty to require the runtime default provider.', this.plugin.settings.hermesPermittedProviderOverrides.join('\n'), async (value) => { this.plugin.settings.hermesPermittedProviderOverrides = splitLines(value); });
 		new Setting(containerEl).setName('Automatic vault context').setHeading();
 		containerEl.createEl('p', { text: 'The current vault is indexed locally after Obsidian loads. The Gatekeeper can request relevant context after routing; only those excerpts are sent to OpenRouter. Documents attached through Docling are added to the local context library automatically.' });

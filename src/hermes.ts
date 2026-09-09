@@ -1,5 +1,6 @@
 import { SseParser } from './sse';
 import { isSecureOrLocalHttpEndpoint } from './endpoint-policy';
+import type { HermesModelRoute } from './hermes-models';
 
 export class HermesError extends Error {
 	constructor(message: string, readonly status?: number) { super(message); }
@@ -49,7 +50,7 @@ export interface HermesCallbacks {
 }
 
 interface HermesModelsResponse {
-	data?: Array<{ id?: unknown }>;
+	data?: Array<{ id?: unknown; root?: unknown }>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -102,6 +103,21 @@ export function parseHermesModelIds(value: unknown): string[] {
 	const data = asRecord(value) as HermesModelsResponse | null;
 	if (!Array.isArray(data?.data)) return [];
 	return data.data.flatMap((entry) => typeof entry?.id === 'string' && entry.id.trim() ? [entry.id.trim()] : []);
+}
+
+/** Parses the alias and resolved upstream model Hermes advertises without exposing provider credentials. */
+export function parseHermesAdvertisedModelRoutes(value: unknown): HermesModelRoute[] {
+	const data = asRecord(value) as HermesModelsResponse | null;
+	if (!Array.isArray(data?.data)) return [];
+	const routes = new Map<string, HermesModelRoute>();
+	for (const entry of data.data) {
+		if (typeof entry?.id !== 'string' || typeof entry?.root !== 'string') continue;
+		const alias = entry.id.trim();
+		const model = entry.root.trim();
+		if (!alias || !model) continue;
+		routes.set(alias, { alias, model });
+	}
+	return [...routes.values()];
 }
 
 /** Normalizes the small differences between Hermes API versions without exposing raw job prompts. */
@@ -199,6 +215,12 @@ export class HermesClient {
 		const response = await fetch(`${this.baseUrl}/v1/models`, { headers: this.headers(), signal });
 		if (!response.ok) throw await errorFromResponse(response);
 		return parseHermesModelIds(await response.json());
+	}
+
+	async listModelRoutes(signal?: AbortSignal): Promise<HermesModelRoute[]> {
+		const response = await fetch(`${this.baseUrl}/v1/models`, { headers: this.headers(), signal });
+		if (!response.ok) throw await errorFromResponse(response);
+		return parseHermesAdvertisedModelRoutes(await response.json());
 	}
 
 	async streamRun(runId: string, callbacks: HermesCallbacks, signal: AbortSignal): Promise<void> {

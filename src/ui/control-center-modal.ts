@@ -6,6 +6,7 @@ import { confirmHermesJobAction, openCreateHermesJobModal, openEditHermesJobModa
 import { openCreateWorkItemModal, confirmWorkExecution } from './work-item-modal';
 import { WORK_STATUS_LABELS, type WorkItem } from '../work-protocol';
 import { WorkService } from '../work-service';
+import type { ModelCatalogRefreshHealth } from '../model-catalog';
 
 function formatDate(value: string | number | null): string {
 	if (!value) return 'Not available';
@@ -16,6 +17,12 @@ function formatDate(value: string | number | null): string {
 function formatError(error: unknown): string {
 	if (error instanceof HermesError) return error.message;
 	return error instanceof Error ? error.message : 'The operation could not be completed.';
+}
+
+function formatCatalogHealth(health: ModelCatalogRefreshHealth | null): string {
+	if (!health) return 'No refresh attempt recorded';
+	if (health.status === 'error') return `Failed ${formatDate(health.lastAttemptAt)} · ${health.error || 'unknown error'}`;
+	return `Updated ${formatDate(health.lastAttemptAt)} · +${health.delta.added} ~${health.delta.changed} -${health.delta.removed} · next ${formatDate(health.nextAttemptAt)}`;
 }
 
 function hasSecret(app: App, secretName: string): boolean {
@@ -71,11 +78,11 @@ class ControlCenterModal extends Modal {
 		this.statusCard(status, 'MCP connections', `${mcpServers.filter((server) => server.enabled).length} enabled · ${mcpServers.filter((server) => server.enabled && server.allowWriteTools).length} write-enabled`, true);
 		this.statusCard(status, 'Hermes policy', `${this.plugin.settings.hermesPermittedProviderOverrides.length} permitted provider overrides`, true);
 		this.statusCard(status, 'OpenRouter FinOps', `${metrics.directResponses} responses · $${metrics.directCostUsd.toFixed(6)} this plugin session`, true);
-		this.statusCard(status, 'Model catalog', catalog ? `${catalog.models.length} models · ${formatDate(catalog.fetchedAt)}` : 'Not downloaded', Boolean(catalog));
+		this.statusCard(status, 'Model catalog', catalog ? `${catalog.models.length} models · ${formatCatalogHealth(this.plugin.settings.modelCatalogHealth)}` : formatCatalogHealth(this.plugin.settings.modelCatalogHealth), Boolean(catalog) && this.plugin.settings.modelCatalogHealth?.status !== 'error');
 
 		new Setting(this.contentEl)
 			.setName('Model catalog')
-			.setDesc('Refreshes reference model metadata. This never changes the permitted routing list.')
+			.setDesc(`Refreshes reference metadata only; it never changes the permitted routing list. ${formatCatalogHealth(this.plugin.settings.modelCatalogHealth)}`)
 			.addButton((button) => button.setButtonText('Refresh catalog').setDisabled(!openRouterReady).onClick(async () => {
 				try {
 					button.setDisabled(true).setButtonText('Refreshing...');

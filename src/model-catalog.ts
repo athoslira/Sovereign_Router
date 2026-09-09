@@ -21,6 +21,25 @@ export interface ModelCatalogSnapshot {
 	models: CatalogModel[];
 }
 
+export interface ModelCatalogDelta {
+	added: number;
+	changed: number;
+	removed: number;
+}
+
+export type ModelCatalogRefreshSource = 'plugin' | 'hermes';
+
+export interface ModelCatalogRefreshHealth {
+	lastAttemptAt: number;
+	status: 'success' | 'error';
+	source: ModelCatalogRefreshSource;
+	durationMs: number;
+	modelCount: number;
+	delta: ModelCatalogDelta;
+	nextAttemptAt: number;
+	error: string | null;
+}
+
 interface OpenRouterModel {
 	id?: unknown;
 	name?: unknown;
@@ -67,6 +86,74 @@ export function normalizeOpenRouterModels(value: unknown, fetchedAt = Date.now()
 
 export function isCatalogFresh(snapshot: ModelCatalogSnapshot | null, refreshDays: number, now = Date.now()): boolean {
 	return Boolean(snapshot && snapshot.fetchedAt > 0 && now - snapshot.fetchedAt < refreshDays * 24 * 60 * 60 * 1000);
+}
+
+function nextCatalogAttempt(now: number, refreshDays: number): number {
+	return now + Math.max(1, refreshDays) * 24 * 60 * 60 * 1000;
+}
+
+function modelSignature(model: CatalogModel): string {
+	return JSON.stringify(model);
+}
+
+function catalogDelta(previous: ModelCatalogSnapshot | null, current: ModelCatalogSnapshot): ModelCatalogDelta {
+	const previousModels = new Map((previous?.models ?? []).map((model) => [model.id, model]));
+	const currentModels = new Map(current.models.map((model) => [model.id, model]));
+	let added = 0;
+	let changed = 0;
+	let removed = 0;
+	for (const [id, model] of currentModels) {
+		const oldModel = previousModels.get(id);
+		if (!oldModel) added++;
+		else if (modelSignature(oldModel) !== modelSignature(model)) changed++;
+	}
+	for (const id of previousModels.keys()) if (!currentModels.has(id)) removed++;
+	return { added, changed, removed };
+}
+
+function catalogError(error: unknown): string {
+	const message = error instanceof Error ? error.message : 'Catalog refresh failed.';
+	return message.replace(/\s+/g, ' ').trim().slice(0, 240) || 'Catalog refresh failed.';
+}
+
+export function catalogRefreshSucceeded(
+	previous: ModelCatalogSnapshot | null,
+	current: ModelCatalogSnapshot,
+	attemptedAt: number,
+	durationMs: number,
+	refreshDays: number,
+	source: ModelCatalogRefreshSource,
+): ModelCatalogRefreshHealth {
+	return {
+		lastAttemptAt: attemptedAt,
+		status: 'success',
+		source,
+		durationMs: Math.max(0, durationMs),
+		modelCount: current.models.length,
+		delta: catalogDelta(previous, current),
+		nextAttemptAt: nextCatalogAttempt(attemptedAt, refreshDays),
+		error: null,
+	};
+}
+
+export function catalogRefreshFailed(
+	previous: ModelCatalogSnapshot | null,
+	attemptedAt: number,
+	durationMs: number,
+	refreshDays: number,
+	error: unknown,
+	source: ModelCatalogRefreshSource,
+): ModelCatalogRefreshHealth {
+	return {
+		lastAttemptAt: attemptedAt,
+		status: 'error',
+		source,
+		durationMs: Math.max(0, durationMs),
+		modelCount: previous?.models.length ?? 0,
+		delta: { added: 0, changed: 0, removed: 0 },
+		nextAttemptAt: nextCatalogAttempt(attemptedAt, refreshDays),
+		error: catalogError(error),
+	};
 }
 
 export async function fetchOpenRouterModelCatalog(

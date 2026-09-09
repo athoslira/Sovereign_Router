@@ -5,15 +5,15 @@ import { isSecureOrLocalHttpEndpoint } from '../src/endpoint-policy';
 import { isSupportedDocument, isTextDocument, needsDoclingConversion } from '../src/document-files';
 import { contextTerms, extractContextExcerpt, rankContextEntries } from '../src/context-search';
 import { DEFAULT_EXECUTOR_MODELS, modelLabel } from '../src/models';
-import { formatHermesModelRoutes, parseHermesModelRoutes } from '../src/hermes-models';
-import { isCatalogFresh, normalizeOpenRouterModels } from '../src/model-catalog';
+import { catalogRefreshFailed, catalogRefreshSucceeded, isCatalogFresh, normalizeOpenRouterModels } from '../src/model-catalog';
 import { parseMcpToolCalls, toExecutorTools } from '../src/mcp-tools';
 import { canCallMcpTool, isAllowedMcpEndpoint } from '../src/mcp-policy';
 import { parseGatekeeperDecision, selectRoute } from '../src/routing';
 import { isAllowedGitHubRepository, isSafeRelativePath } from '../src/skill-policy';
 import { hermesProviderOverrideError } from '../src/hermes-policy';
 import { OperationalMetrics } from '../src/operational-metrics';
-import { normalizeHermesJobs, parseHermesModelIds, parseHermesRuntimeStatus } from '../src/hermes';
+import { normalizeHermesJobs, parseHermesAdvertisedModelRoutes, parseHermesModelIds, parseHermesRuntimeStatus } from '../src/hermes';
+import { reconcileHermesModelRoutes } from '../src/hermes-models';
 import { formatContextPackage, parseMemoryCandidates, selectMemoriesForContext, summarizeSession, type LocalMemory } from '../src/local-context';
 import { parseDocumentOperation, safeDocumentPath } from '../src/document-authoring';
 import { safeVaultRelativeRoot, vaultOutputPath } from '../src/vault-path-policy';
@@ -29,6 +29,7 @@ const settings: SovereignRouterSettings = {
 	permittedExecutorModels: ['moonshotai/kimi-k2.7-code'],
 	customModelSlugs: [],
 	modelCatalog: null,
+	modelCatalogHealth: null,
 	modelCatalogRefreshDays: 15,
 	modelCatalogVersion: 1,
 	routingInstruction: '',
@@ -41,6 +42,8 @@ const settings: SovereignRouterSettings = {
 	enableHermesAutoRouting: false,
 	hermesModelRoutes: [{ alias: 'sr-kimi-code', model: 'moonshotai/kimi-k2.7-code' }],
 	hermesDefaultModelAlias: 'sr-kimi-code',
+	hermesModelRoutesUpdatedAt: null,
+	hermesModelRoutesError: null,
 	hermesPermittedProviderOverrides: [],
 	graphifyGraphPath: '.sovereign-router/graphify-out/graph.json',
 	localContextSummaryBudget: 6_000,
@@ -74,12 +77,9 @@ run('validates permitted routes, context decisions, and fallback routes', () => 
 	assert.deepEqual(selectRoute(hermes, { ...settings, enableHermesAutoRouting: true }).skill, { source: 'local', path: 'must-not-reach-hermes.md' });
 	const badHermesRoute = parseGatekeeperDecision({ model: settings.defaultExecutorModel, runtime: 'hermes', hermes_model: 'not-approved', skill: null, context: null });
 	assert.equal(selectRoute(badHermesRoute, { ...settings, enableHermesAutoRouting: true }).hermesModel, 'sr-kimi-code');
-});
-
-run('parses explicit Hermes model routes and rejects malformed aliases', () => {
-	const routes = parseHermesModelRoutes('sr-fast = provider/fast\ninvalid alias = provider/nope\nsr-reasoning=provider/reasoning');
-	assert.deepEqual(routes, [{ alias: 'sr-fast', model: 'provider/fast' }, { alias: 'sr-reasoning', model: 'provider/reasoning' }]);
-	assert.equal(formatHermesModelRoutes(routes), 'sr-fast = provider/fast\nsr-reasoning = provider/reasoning');
+	const mismatchedHermesName = parseGatekeeperDecision({ model: 'DeepSeek V4 Flash', runtime: 'hermes', hermes_model: 'sr-kimi-code', skill: null, context: null });
+	assert.equal(selectRoute(mismatchedHermesName, { ...settings, enableHermesAutoRouting: true }).model, 'moonshotai/kimi-k2.7-code');
+	assert.equal(selectRoute(mismatchedHermesName, { ...settings, enableHermesAutoRouting: true }).hermesModel, 'sr-kimi-code');
 });
 
 run('blocks unsafe skill paths and unapproved GitHub repositories', () => {
@@ -115,6 +115,53 @@ run('normalizes OpenRouter catalog data without auto-authorizing discovered mode
 	assert.equal(settings.permittedExecutorModels.includes('provider/example'), false);
 	assert.equal(isCatalogFresh(catalog, 15, 1001), true);
 	assert.equal(isCatalogFresh(catalog, 15, 1000 + 16 * 24 * 60 * 60 * 1000), false);
+});
+
+run('records successful catalog refreshes with a model delta and next due time', () => {
+	const previous = normalizeOpenRouterModels({ data: [{ id: 'provider/old', name: 'Old', context_length: 16 }] }, 100);
+	const current = normalizeOpenRouterModels({ data: [
+		{ id: 'provider/old', name: 'Old', context_length: 32 },
+		{ id: 'provider/new', name: 'New', context_length: 16 },
+	] }, 1_000);
+	const health = catalogRefreshSucceeded(previous, current, 1_000, 25, 15, 'plugin');
+	assert.deepEqual(health, {
+		lastAttemptAt: 1_000,
+		status: 'success',
+		source: 'plugin',
+		durationMs: 25,
+		modelCount: 2,
+		delta: { added: 1, changed: 1, removed: 0 },
+		nextAttemptAt: 1_000 + 15 * 24 * 60 * 60 * 1000,
+		error: null,
+	});
+});
+
+run('records catalog failures without discarding the previous model count', () => {
+	const catalog = normalizeOpenRouterModels({ data: [{ id: 'provider/kept', name: 'Kept' }] }, 100);
+	const health = catalogRefreshFailed(catalog, 2_000, 50, 15, new Error('network unavailable'), 'plugin');
+	assert.equal(health.status, 'error');
+	assert.equal(health.modelCount, 1);
+	assert.equal(health.error, 'network unavailable');
+	assert.equal(health.nextAttemptAt, 2_000 + 15 * 24 * 60 * 60 * 1000);
+});
+
+run('reconciles Hermes aliases from advertised root model identifiers', () => {
+	const advertised = parseHermesAdvertisedModelRoutes({ data: [
+		{ id: 'renamed-fast-route', root: 'deepseek/deepseek-v4-flash' },
+		{ id: 'unapproved-route', root: 'provider/unapproved' },
+	] });
+	assert.deepEqual(advertised, [
+		{ alias: 'renamed-fast-route', model: 'deepseek/deepseek-v4-flash' },
+		{ alias: 'unapproved-route', model: 'provider/unapproved' },
+	]);
+	const resolved = reconcileHermesModelRoutes(
+		[{ alias: 'sr-deepseek-deepseek-v4-flash', model: 'deepseek/deepseek-v4-flash' }],
+		advertised,
+		['deepseek/deepseek-v4-flash'],
+		'sr-deepseek-deepseek-v4-flash',
+	);
+	assert.deepEqual(resolved.routes, [{ alias: 'renamed-fast-route', model: 'deepseek/deepseek-v4-flash' }]);
+	assert.equal(resolved.defaultAlias, 'renamed-fast-route');
 });
 
 run('limits document context while preserving the attachment label', () => {

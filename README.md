@@ -17,7 +17,7 @@ All six are enabled in the default permitted executor list. The canonical OpenRo
 
 ## Dynamic model catalog and model policy
 
-The settings panel can refresh the official OpenRouter model catalog and stores only non-sensitive metadata: model ID/name, context window, supported modalities, tool support, and OpenRouter's reference token prices. It refreshes opportunistically when Obsidian is open and the cache is older than 15 days (configurable). Actual response cost continues to come exclusively from OpenRouter's `usage.cost` event.
+The settings panel can refresh the official OpenRouter model catalog and stores only non-sensitive metadata: model ID/name, context window, supported modalities, tool support, and OpenRouter's reference token prices. It refreshes opportunistically when Obsidian is open and the cache is older than 15 days (configurable). Each attempt records its result, duration, source, model count, added/changed/removed totals, next due time, and a bounded failure reason. Actual response cost continues to come exclusively from OpenRouter's `usage.cost` event.
 
 - Add a slug to **Manual-only models** to make it selectable in a chat without granting it automatic routing.
 - Add a slug to **Permitted executor models** only when it is approved for Gatekeeper routing.
@@ -27,7 +27,7 @@ The settings panel can refresh the official OpenRouter model catalog and stores 
 
 The chat header has an execution runtime selector: **Sovereign chat** uses the existing OpenRouter, local-skill, vault-context, and remote-MCP path; **Hermes Agent** delegates an execution-oriented task to a separately configured Hermes API server; **Auto runtime** lets the Gatekeeper choose Hermes only when automatic Hermes routing is explicitly enabled.
 
-To use Hermes, install and configure its API server separately, then set its HTTPS (or loopback HTTP) URL and API key in **Settings → Sovereign Router**. The key is kept in Obsidian SecretStorage. Sovereign Router calls Hermes' run API and streams progress/output into the session; **Cancel** also asks Hermes to stop the remote run. The plugin does not install Hermes, start a terminal, launch subprocesses, or enable local MCP servers itself.
+To use Hermes, install and configure its API server separately, then set its HTTPS (or loopback HTTP) URL and API key in **Settings → Sovereign Router**. The key is kept in Obsidian SecretStorage. Sovereign Router calls Hermes' run API and streams progress/output into the session; **Cancel** also asks Hermes to stop the remote run. Before routing and before a Hermes run, the plugin synchronizes aliases from Hermes `/v1/models` and uses each advertised `root` model as the source of truth. The plugin does not install Hermes, start a terminal, launch subprocesses, or enable local MCP servers itself.
 
 When Hermes performs terminal, subagent, cron, or local stdio MCP work, its own approval and security policies remain authoritative. Keep the Hermes API on loopback or behind authenticated HTTPS.
 
@@ -37,7 +37,7 @@ For Hermes model aliases, the controlled approval flow for newly researched mode
 
 Use **Sovereign Router: Open control center** from the command palette, or select **Control** in the chat header, to use Sovereign Router as the operational control plane.
 
-- The status cards report whether OpenRouter and Hermes credentials are available, the local vault-context index state, cached external documents, enabled MCP connections, and the model catalog timestamp.
+- The status cards report whether OpenRouter and Hermes credentials are available, the local vault-context index state, cached external documents, enabled MCP connections, synchronized model routes, and catalog refresh health.
 - **OpenRouter FinOps** aggregates only effective `usage.cost` values received while the plugin remains open. It stores no prompts, messages, files, or telemetry and resets when Obsidian unloads the plugin.
 - **Test connection** verifies the configured Hermes API without starting an agent. When the server advertises capabilities, the panel also reports whether its jobs API is available.
 - **Refresh catalog** updates only non-sensitive model metadata. It does not authorize models for automatic routing.
@@ -46,6 +46,8 @@ Use **Sovereign Router: Open control center** from the command palette, or selec
 - Provider overrides are denied unless they appear in **Permitted Hermes provider overrides**. An empty list forces the runtime default provider. Hermes itself owns the actual model configuration; the model field it reports through the API is informational.
 
 The control center intentionally does not expose a terminal, local stdio MCPs, or unrestricted file access through the Obsidian plugin. It governs those capabilities through Hermes rather than duplicating them.
+
+Every message exposes a **Copy** button: user messages copy the submitted prompt and assistant messages copy the complete current response. The usual selected-text copy shortcut also remains available within the panel.
 
 For a tested Windows setup, including API authentication, Obsidian CORS, validation, and the Hermes 0.19 streaming workaround, see [the Hermes Windows setup guide](docs/HERMES_WINDOWS_SETUP.md).
 

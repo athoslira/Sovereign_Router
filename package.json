@@ -1,6 +1,6 @@
 {
 	"name": "sovereign-router",
-	"version": "1.4.6",
+  "version": "1.4.7",
 	"description": "Mobile-first BYOK OpenRouter chat plugin for Obsidian.",
 	"main": "main.js",
 	"type": "module",

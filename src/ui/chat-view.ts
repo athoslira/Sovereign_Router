@@ -726,7 +726,19 @@ export class SovereignRouterView extends ItemView {
 		if (!apiKey || !this.plugin.settings.hermesServiceUrl) throw new HermesError('Configure the Hermes API URL and API key in Sovereign Router settings first.');
 		const signal = session.abortController?.signal;
 		if (!signal) throw new HermesError('The session request is no longer active.');
-		const hermesModelAlias = route?.hermesModel ?? session.hermesModelAlias ?? this.plugin.settings.hermesDefaultModelAlias;
+		try {
+			await this.plugin.refreshHermesModelRoutes();
+		} catch {
+			// The last synchronized routes remain usable when Hermes discovery is temporarily unavailable.
+		}
+		const routes = this.plugin.settings.hermesModelRoutes;
+		const previousAlias = route?.hermesModel ?? session.hermesModelAlias ?? this.plugin.settings.hermesDefaultModelAlias;
+		const previousRoute = routes.find((candidate) => candidate.alias === previousAlias);
+		const preferredModel = route?.model ?? session.model ?? previousRoute?.model;
+		const resolvedRoute = (preferredModel ? routes.find((candidate) => candidate.model === preferredModel) : null)
+			?? previousRoute
+			?? routes.find((candidate) => candidate.alias === this.plugin.settings.hermesDefaultModelAlias);
+		const hermesModelAlias = resolvedRoute?.alias ?? null;
 		if (!hermesModelAlias) throw new HermesError('Configure a default Hermes model route before starting a Hermes session.');
 		const instructions = await this.buildHermesInstructions(session, route, question);
 		const client = new HermesClient(this.plugin.settings.hermesServiceUrl, apiKey);
@@ -734,6 +746,7 @@ export class SovereignRouterView extends ItemView {
 		if (!modelIds.includes(hermesModelAlias)) throw new HermesError(`Hermes model route "${hermesModelAlias}" is not available. Configure it in Hermes and restart the gateway.`);
 		session.hermesClient = client;
 		session.hermesModelAlias = hermesModelAlias;
+		session.model = resolvedRoute?.model ?? session.model;
 		session.resolvedRuntime = 'hermes';
 		this.refreshSessionUi(session);
 		this.setAssistantMeta(session, assistant, `Hermes Agent | ${hermesModelAlias} | preparing external agent run`);
@@ -847,6 +860,13 @@ export class SovereignRouterView extends ItemView {
 		const requested = extractRequestedSkill(question);
 		const requestedLocal = requested ? new SkillResolver(this.app, this.plugin.settings).findLocalByName(requested.name) : null;
 		session.requestedSkill = requested?.name ?? null;
+		if (this.hasHermesCredentials()) {
+			try {
+				await this.plugin.refreshHermesModelRoutes();
+			} catch {
+				// Route selection can use the last synchronized cache when Hermes is offline.
+			}
+		}
 		let route: RouteResult;
 		if (session.selectedModel) {
 			route = { model: session.selectedModel, hermesModel: null, skill: null, context: null, runtime: 'chat', note: `Manual model: ${modelLabel(session.selectedModel)}.` };
@@ -1062,7 +1082,18 @@ export class SovereignRouterView extends ItemView {
 
 	private createMessageElement(message: SessionDisplayMessage): { bodyEl: HTMLElement; metaEl: HTMLElement | null } {
 		const messageEl = this.messagesEl.createDiv({ cls: `sr-message sr-${message.role}` });
-		messageEl.createDiv({ text: message.role === 'user' ? 'You' : 'Sovereign', cls: 'sr-message-role' });
+		const heading = messageEl.createDiv({ cls: 'sr-message-heading' });
+		heading.createDiv({ text: message.role === 'user' ? 'You' : 'Sovereign', cls: 'sr-message-role' });
+		const copy = heading.createEl('button', {
+			text: 'Copy',
+			cls: 'sr-message-copy',
+			attr: { 'aria-label': message.role === 'user' ? 'Copy prompt' : 'Copy response', title: message.role === 'user' ? 'Copy prompt' : 'Copy response' },
+		});
+		this.registerDomEvent(copy, 'click', () => {
+			void this.copyToClipboard(message.content)
+				.then(() => new Notice(message.role === 'user' ? 'Prompt copied.' : 'Response copied.'))
+				.catch(() => new Notice('Could not copy this message.'));
+		});
 		if (message.role === 'user') return { bodyEl: messageEl.createDiv({ text: message.content, cls: 'sr-message-body' }), metaEl: null };
 		const metaEl = messageEl.createDiv({ text: message.meta || '', cls: 'sr-message-meta' });
 		return { bodyEl: messageEl.createDiv({ text: message.content, cls: 'sr-message-body' }), metaEl };
@@ -1111,13 +1142,10 @@ export class SovereignRouterView extends ItemView {
 				return;
 			}
 		} catch { /* Some mobile WebViews deny Clipboard API access; use the browser fallback below. */ }
-		const fallback = document.createElement('textarea');
+		const fallback = document.body.createEl('textarea', { cls: 'sr-copy-fallback' });
 		try {
 			fallback.value = content;
 			fallback.setAttribute('readonly', '');
-			fallback.style.position = 'fixed';
-			fallback.style.opacity = '0';
-			document.body.appendChild(fallback);
 			fallback.select();
 			if (!document.execCommand('copy')) throw new Error('Copy command was unavailable.');
 		} finally {

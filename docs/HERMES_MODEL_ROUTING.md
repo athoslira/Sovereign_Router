@@ -1,6 +1,6 @@
 # Hermes model routing
 
-Sovereign Router treats a Hermes model route as an explicit allowlist entry. The Gatekeeper can select a route only when the alias is configured in both Sovereign Router and the Hermes API server.
+Sovereign Router treats a Hermes model route as an explicit allowlist entry. Hermes is the source of truth for alias-to-model mappings: Sovereign synchronizes `/v1/models`, uses each advertised `id` as the alias and `root` as the underlying model, and caches the last successful result for offline compatibility.
 
 ## Current routes
 
@@ -13,7 +13,7 @@ Sovereign Router treats a Hermes model route as an explicit allowlist entry. The
 | `sr-moonshotai-kimi-k2-7-code` | `moonshotai/kimi-k2.7-code` |
 | `sr-x-ai-grok-4-3` | `x-ai/grok-4.3` |
 
-For a Hermes session chosen automatically, the Gatekeeper returns an approved `hermes_model` alias. Sovereign Router verifies that Hermes advertises the alias through `/v1/models`, then sends it in the `/v1/runs` request. A manual Hermes session uses **Default Hermes model route**.
+For a Hermes session chosen automatically, the Gatekeeper returns an approved `hermes_model` alias. Sovereign Router validates the alias against the synchronized runtime route and takes the underlying model from Hermes rather than from a duplicated text value in the Gatekeeper response. A manual Hermes session uses **Default Hermes model route**. If Hermes renames an alias but preserves its `root` model, Sovereign automatically selects the renamed alias.
 
 ## Approving a newly researched model
 
@@ -22,11 +22,10 @@ The 15-day catalog refresh is discovery only. It must not grant a model new rout
 After reviewing a new model, approve it in this order:
 
 1. Add its OpenRouter slug to **Permitted executor models**.
-2. Add a deterministic alias to **Hermes model routes** in the form `sr-provider-model = provider/model`.
-3. Add the matching alias under `platforms.api_server.extra.model_routes` in Hermes `config.yaml`, using provider `openrouter` unless the route intentionally uses another configured provider.
-4. Restart Hermes Gateway and verify the alias appears in `GET /v1/models`.
+2. Add an alias under `platforms.api_server.extra.model_routes` in Hermes `config.yaml`, using provider `openrouter` unless the route intentionally uses another configured provider.
+3. Restart Hermes Gateway and use **Sync routes** in Sovereign Router settings, or send a Hermes task; the plugin synchronizes automatically before routing.
 
-This two-sided approval prevents an unreviewed catalog item from becoming an executable Hermes route. If the alias is absent from Hermes, Sovereign Router stops the run with an actionable error rather than silently falling back to a different model.
+This policy boundary prevents an unreviewed catalog item from becoming an executable Hermes route. Discovery does not add an item to **Permitted executor models**, and synchronizing aliases never changes Hermes configuration.
 
 ## Skills and MCPs
 
