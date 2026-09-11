@@ -47,7 +47,18 @@ export interface HermesRuntimeStatus {
 export interface HermesCallbacks {
 	onDelta: (text: string) => void;
 	onStatus: (status: string) => void;
+	onApproval?: (approval: HermesApprovalRequest) => void;
 }
+
+export interface HermesImageToolset {
+	available: boolean;
+	enabled: boolean;
+	configured: boolean;
+	tools: string[];
+}
+
+export type HermesApprovalChoice = 'once' | 'session' | 'always' | 'deny';
+export interface HermesApprovalRequest { runId: string; toolName: string; message: string; choices: HermesApprovalChoice[]; }
 
 interface HermesModelsResponse {
 	data?: Array<{ id?: unknown; root?: unknown }>;
@@ -176,6 +187,36 @@ function statusFromEvent(value: unknown): string | null {
 	return null;
 }
 
+export function parseHermesImageToolset(value: unknown): HermesImageToolset {
+	const root = asRecord(value);
+	const data = Array.isArray(root?.data) ? root.data : [];
+	for (const candidate of data) {
+		const toolset = asRecord(candidate);
+		if (toolset?.name !== 'image_gen') continue;
+		return { available: true, enabled: toolset.enabled === true, configured: toolset.configured === true, tools: stringList(toolset.tools) };
+	}
+	return { available: false, enabled: false, configured: false, tools: [] };
+}
+
+export function parseHermesApprovalEvent(value: unknown): HermesApprovalRequest | null {
+	const payload = asRecord(value);
+	if (!payload) return null;
+	const type = typeof payload.event === 'string' ? payload.event : typeof payload.type === 'string' ? payload.type : '';
+	if (!type.includes('approval') || type.includes('responded')) return null;
+	const runId = typeof payload.run_id === 'string' ? payload.run_id : '';
+	if (!runId) return null;
+	const patternKey = typeof payload.pattern_key === 'string' ? payload.pattern_key : '';
+	const command = typeof payload.command === 'string' ? payload.command : '';
+	const inferredTool = patternKey.match(/^plugin_rule:([^:]+)/)?.[1] ?? command.match(/^<([^>]+)>/)?.[1];
+	const choices = stringList(payload.choices).filter((choice): choice is HermesApprovalChoice => ['once', 'session', 'always', 'deny'].includes(choice));
+	return {
+		runId,
+		toolName: typeof payload.tool_name === 'string' ? payload.tool_name : typeof payload.tool === 'string' ? payload.tool : inferredTool || 'Hermes tool',
+		message: typeof payload.message === 'string' ? payload.message.slice(0, 500) : typeof payload.description === 'string' ? payload.description.slice(0, 500) : 'Hermes requires approval before continuing.',
+		choices: choices.length ? choices : ['once', 'session', 'always', 'deny'],
+	};
+}
+
 async function errorFromResponse(response: Response): Promise<HermesError> {
 	let message = `Hermes request failed (${response.status}).`;
 	try {
@@ -234,6 +275,8 @@ export class HermesClient {
 			if (!event || event === '[DONE]') return;
 			try {
 				const payload: unknown = JSON.parse(event);
+				const approval = parseHermesApprovalEvent(payload);
+				if (approval) callbacks.onApproval?.(approval);
 				const status = statusFromEvent(payload);
 				if (status) callbacks.onStatus(status);
 				const text = textFromEvent(payload);
@@ -249,6 +292,19 @@ export class HermesClient {
 		}
 		for (const event of parser.push(decoder.decode())) handle(event);
 		for (const event of parser.finish()) handle(event);
+	}
+
+	async inspectImageToolset(signal?: AbortSignal): Promise<HermesImageToolset> {
+		const response = await fetch(`${this.baseUrl}/v1/toolsets`, { headers: this.headers(), signal });
+		if (!response.ok) throw await errorFromResponse(response);
+		return parseHermesImageToolset(await response.json());
+	}
+
+	async approveRun(runId: string, choice: HermesApprovalChoice, resolveAll = false, signal?: AbortSignal): Promise<void> {
+		const response = await fetch(`${this.baseUrl}/v1/runs/${encodeURIComponent(runId)}/approval`, {
+			method: 'POST', headers: this.headers(), signal, body: JSON.stringify({ choice, resolve_all: resolveAll }),
+		});
+		if (!response.ok) throw await errorFromResponse(response);
 	}
 
 	async stopRun(runId: string): Promise<void> {

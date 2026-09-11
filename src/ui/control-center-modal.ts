@@ -1,5 +1,5 @@
 import { App, Modal, Notice, Setting } from 'obsidian';
-import { HermesClient, HermesError, type HermesJob, type HermesJobAction, type HermesRuntimeStatus } from '../hermes';
+import { HermesClient, HermesError, type HermesImageToolset, type HermesJob, type HermesJobAction, type HermesRuntimeStatus } from '../hermes';
 import { hermesProviderOverrideError } from '../hermes-policy';
 import type SovereignRouterPlugin from '../main';
 import { confirmHermesJobAction, openCreateHermesJobModal, openEditHermesJobModal } from './hermes-job-modals';
@@ -7,6 +7,10 @@ import { openCreateWorkItemModal, confirmWorkExecution } from './work-item-modal
 import { WORK_STATUS_LABELS, type WorkItem } from '../work-protocol';
 import { WorkService } from '../work-service';
 import type { ModelCatalogRefreshHealth } from '../model-catalog';
+import { AgentKernelClient, type KernelGrant, type KernelHealth, type RuntimeEvent } from '../agent-kernel';
+import { providerCatalog } from '../image-workflow';
+import { openImageLab } from './image-lab-modal';
+import { chooseHermesApproval } from './hermes-approval-modal';
 
 function formatDate(value: string | number | null): string {
 	if (!value) return 'Not available';
@@ -40,6 +44,12 @@ class ControlCenterModal extends Modal {
 	private runtimeStatus: HermesRuntimeStatus | null = null;
 	private runtimeError: string | null = null;
 	private checkingRuntime = false;
+	private imageToolset: HermesImageToolset | null = null;
+	private kernelStatus: KernelHealth | null = null;
+	private kernelError: string | null = null;
+	private checkingKernel = false;
+	private kernelGrants: KernelGrant[] | null = null;
+	private kernelEvents: RuntimeEvent[] | null = null;
 	private runningWorkId: string | null = null;
 
 	constructor(app: App, private readonly plugin: SovereignRouterPlugin) { super(app); }
@@ -77,6 +87,11 @@ class ControlCenterModal extends Modal {
 		this.statusCard(status, 'External documents', `${context.externalEntries} cached`, true);
 		this.statusCard(status, 'MCP connections', `${mcpServers.filter((server) => server.enabled).length} enabled · ${mcpServers.filter((server) => server.enabled && server.allowWriteTools).length} write-enabled`, true);
 		this.statusCard(status, 'Hermes policy', `${this.plugin.settings.hermesPermittedProviderOverrides.length} permitted provider overrides`, true);
+		const kernelReady = !this.plugin.settings.agentKernelEnabled ? false : Boolean(this.kernelStatus && !this.kernelError);
+		this.statusCard(status, 'Agent Kernel', !this.plugin.settings.agentKernelEnabled ? 'Disabled' : this.kernelError ? 'Connection failed' : this.kernelStatus ? `Connected v${this.kernelStatus.version} · heartbeat ${formatDate(this.kernelStatus.heartbeatAt ? this.kernelStatus.heartbeatAt * 1000 : null)} · ${this.kernelStatus.pendingApprovals} pending approvals` : 'Configured · not checked', kernelReady);
+		const providers = providerCatalog();
+		const hermesImage = this.imageToolset?.available ? this.imageToolset.enabled && this.imageToolset.configured ? 'Hermes ready' : 'Hermes disabled or missing a key' : 'Hermes not inspected';
+		this.statusCard(status, 'Image toolkit', `${providers.filter((provider) => provider.costClass === 'local-free').length} local-free · ${providers.filter((provider) => provider.requiresApproval).length} approval-gated · ${hermesImage}`, true);
 		this.statusCard(status, 'OpenRouter FinOps', `${metrics.directResponses} responses · $${metrics.directCostUsd.toFixed(6)} this plugin session`, true);
 		this.statusCard(status, 'Model catalog', catalog ? `${catalog.models.length} models · ${formatCatalogHealth(this.plugin.settings.modelCatalogHealth)}` : formatCatalogHealth(this.plugin.settings.modelCatalogHealth), Boolean(catalog) && this.plugin.settings.modelCatalogHealth?.status !== 'error');
 
@@ -98,6 +113,16 @@ class ControlCenterModal extends Modal {
 			.setName('Hermes runtime')
 			.setDesc(this.runtimeError ? `Last check failed: ${this.runtimeError}` : 'Checks the configured Hermes API without running an agent or an automation.')
 			.addButton((button) => button.setButtonText(this.checkingRuntime ? 'Checking...' : 'Test connection').setDisabled(!hermesReady || this.checkingRuntime).onClick(() => void this.checkRuntime()));
+		new Setting(this.contentEl)
+			.setName('Agent Kernel bridge')
+			.setDesc(this.kernelError ? `Last check failed: ${this.kernelError}` : 'Checks the authenticated local governance bridge without running a tool.')
+			.addButton((button) => button.setButtonText(this.checkingKernel ? 'Checking...' : 'Test bridge').setDisabled(!this.plugin.settings.agentKernelEnabled || !hermesReady || this.checkingKernel).onClick(() => void this.checkKernel()));
+		new Setting(this.contentEl)
+			.setName('Local image optimizer')
+			.setDesc('Resize and convert the active PNG, JPEG, or WebP inside the vault. Processing stays on this device.')
+			.addButton((button) => button.setButtonText('Open image optimizer').onClick(() => openImageLab(this.app, this.plugin.settings.imageOutputRoot)));
+		this.renderKernelGrants();
+		this.renderKernelEvents();
 
 		new Setting(this.contentEl)
 			.setName('Policies and connections')
@@ -203,6 +228,7 @@ class ControlCenterModal extends Modal {
 		await this.render();
 		try {
 			this.runtimeStatus = await client.inspectRuntime();
+			try { this.imageToolset = await client.inspectImageToolset(); } catch { this.imageToolset = null; }
 			new Notice('Hermes runtime is reachable.');
 		} catch (error) {
 			this.runtimeStatus = null;
@@ -211,6 +237,75 @@ class ControlCenterModal extends Modal {
 			this.checkingRuntime = false;
 			await this.render();
 		}
+	}
+
+	private async checkKernel(): Promise<void> {
+		const secretName = this.plugin.settings.hermesSecretName;
+		const key = secretName ? this.app.secretStorage.getSecret(secretName) : null;
+		if (!key) { new Notice('Configure the Hermes API key first.'); return; }
+		this.checkingKernel = true;
+		this.kernelError = null;
+		await this.render();
+		try {
+			const client = new AgentKernelClient(this.plugin.settings.agentKernelBridgeUrl, key);
+			[this.kernelStatus, this.kernelGrants, this.kernelEvents] = await Promise.all([
+				client.health(),
+				client.listGrants(),
+				client.listEvents(),
+			]);
+			new Notice('Agent Kernel bridge is reachable.');
+		} catch (error) {
+			this.kernelStatus = null;
+			this.kernelGrants = null;
+			this.kernelEvents = null;
+			this.kernelError = formatError(error);
+		} finally {
+			this.checkingKernel = false;
+			await this.render();
+		}
+	}
+
+	private renderKernelEvents(): void {
+		if (!this.plugin.settings.agentKernelEnabled) return;
+		const section = this.contentEl.createDiv({ cls: 'sr-control-jobs' });
+		section.createEl('h3', { text: 'Recent Agent Kernel events' });
+		if (this.kernelEvents === null) { section.createEl('p', { text: 'Test the bridge to load the sanitized event history.' }); return; }
+		if (!this.kernelEvents.length) { section.createEl('p', { text: 'No governed runtime events recorded.' }); return; }
+		for (const event of this.kernelEvents.slice(0, 20)) {
+			const row = section.createDiv({ cls: 'sr-control-job' });
+			row.createEl('strong', { text: event.type });
+			row.createDiv({ text: event.summary });
+			row.createDiv({ text: `${new Date(event.createdAt * 1000).toLocaleString()}${event.decision ? ` · ${event.decision}` : ''}`, cls: 'sr-control-job-meta' });
+		}
+	}
+
+	private renderKernelGrants(): void {
+		if (!this.plugin.settings.agentKernelEnabled) return;
+		const section = this.contentEl.createDiv({ cls: 'sr-control-jobs' });
+		section.createEl('h3', { text: 'Agent Kernel grants' });
+		if (this.kernelGrants === null) { section.createEl('p', { text: 'Test the bridge to load approval grants.' }); return; }
+		if (!this.kernelGrants.length) { section.createEl('p', { text: 'No session or permanent grants recorded.' }); return; }
+		for (const grant of this.kernelGrants) {
+			const row = section.createDiv({ cls: 'sr-control-job' });
+			row.createEl('strong', { text: grant.ruleKey });
+			row.createDiv({ text: `${grant.scope} · ${grant.revoked ? 'local deny override' : 'active'} · ${new Date(grant.createdAt * 1000).toLocaleString()}`, cls: 'sr-control-job-meta' });
+			const action = row.createEl('button', { text: grant.revoked ? 'Restore requests' : 'Revoke', cls: grant.revoked ? '' : 'mod-warning' });
+			action.addEventListener('click', () => void this.setKernelGrantRevoked(grant.id, !grant.revoked));
+		}
+	}
+
+	private async setKernelGrantRevoked(grantId: string, revoked: boolean): Promise<void> {
+		const secretName = this.plugin.settings.hermesSecretName;
+		const key = secretName ? this.app.secretStorage.getSecret(secretName) : null;
+		if (!key) return;
+		try {
+			const client = new AgentKernelClient(this.plugin.settings.agentKernelBridgeUrl, key);
+			if (revoked) await client.revokeGrant(grantId);
+			else await client.restoreGrant(grantId);
+			this.kernelGrants = await client.listGrants();
+			new Notice(revoked ? 'Agent Kernel grant revoked. Matching actions are now blocked.' : 'Agent Kernel deny override removed. The next matching action follows Hermes approval policy.');
+			await this.render();
+		} catch (error) { new Notice(formatError(error)); }
 	}
 
 	private async confirmJobAction(job: HermesJob, action: HermesJobAction | 'delete'): Promise<void> {
@@ -329,7 +424,7 @@ class ControlCenterModal extends Modal {
 		this.runningWorkId = item.id;
 		await this.render();
 		try {
-			await this.workService().execute(item, key, () => { /* Execution output is stored as an artifact after streaming completes. */ }, new AbortController().signal);
+			await this.workService().execute(item, key, () => { /* Execution output is stored as an artifact after streaming completes. */ }, new AbortController().signal, (request) => chooseHermesApproval(this.app, request));
 			new Notice('Hermes execution finished. Verify the evidence before completion.');
 		} catch (error) { new Notice(`Hermes execution ended: ${formatError(error)}`); }
 		finally { this.runningWorkId = null; await this.render(); }

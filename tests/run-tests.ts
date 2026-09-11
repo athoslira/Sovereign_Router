@@ -12,7 +12,7 @@ import { parseGatekeeperDecision, selectRoute } from '../src/routing';
 import { isAllowedGitHubRepository, isSafeRelativePath } from '../src/skill-policy';
 import { hermesProviderOverrideError } from '../src/hermes-policy';
 import { OperationalMetrics } from '../src/operational-metrics';
-import { normalizeHermesJobs, parseHermesAdvertisedModelRoutes, parseHermesModelIds, parseHermesRuntimeStatus } from '../src/hermes';
+import { normalizeHermesJobs, parseHermesAdvertisedModelRoutes, parseHermesImageToolset, parseHermesModelIds, parseHermesRuntimeStatus } from '../src/hermes';
 import { reconcileHermesModelRoutes } from '../src/hermes-models';
 import { formatContextPackage, parseMemoryCandidates, selectMemoriesForContext, summarizeSession, type LocalMemory } from '../src/local-context';
 import { parseDocumentOperation, safeDocumentPath } from '../src/document-authoring';
@@ -22,6 +22,10 @@ import { canTransitionWorkItem, createWorkEvent, plannerPrompt, safeWorkOutputRo
 import { SseParser } from '../src/sse';
 import { serializeMcpToolResult, serializeStructuredContext } from '../src/context-serialization';
 import type { SovereignRouterSettings } from '../src/settings';
+import { AgentKernelClient, extractPlannedWritePaths, parseKernelGrants, parseKernelHealth, parseRuntimeEvents } from '../src/agent-kernel';
+import { imageAuthoringInstruction, isImageRequest, parseImageOperation, providerCatalog } from '../src/image-workflow';
+import { parseHermesApprovalEvent } from '../src/hermes';
+import { computeImageDimensions, imageOutputName, supportedRasterImage } from '../src/image-processing';
 
 const settings: SovereignRouterSettings = {
 	openRouterSecretName: '',
@@ -57,7 +61,68 @@ const settings: SovereignRouterSettings = {
 	canvasMaxImageBytes: 6 * 1024 * 1024,
 	workItemOutputRoot: 'Sovereign/Tasks',
 	mcpServers: [],
+	agentKernelEnabled: false,
+	agentKernelBridgeUrl: 'http://127.0.0.1:8643',
+	agentKernelAllowedRoots: [],
+	imageAuthoringEnabled: true,
+	imageOutputRoot: 'Sovereign/Images',
 };
+
+run('normalizes Agent Kernel health and sanitized runtime events', () => {
+	assert.deepEqual(parseKernelHealth({ status: 'ok', version: '1.5.0', heartbeat_at: 123, pending_approvals: 2 }), {
+		status: 'ok', version: '1.5.0', heartbeatAt: 123, pendingApprovals: 2,
+	});
+	assert.deepEqual(parseRuntimeEvents({ data: [{ id: 7, execution_id: 'exec-1', type: 'tool.decision', created_at: 99, summary: 'safe', decision: 'allow', args: { secret: 'discard' } }, { bad: true }] }), [{ id: 7, executionId: 'exec-1', type: 'tool.decision', createdAt: 99, summary: 'safe', decision: 'allow' }]);
+});
+
+run('restricts the Agent Kernel bridge to loopback', () => {
+	assert.doesNotThrow(() => new AgentKernelClient('http://127.0.0.1:8643', 'secret'));
+	assert.doesNotThrow(() => new AgentKernelClient('http://localhost:8643', 'secret'));
+	assert.throws(() => new AgentKernelClient('https://bridge.example.com', 'secret'));
+});
+
+run('extracts only explicit file paths from an approved plan', () => {
+	assert.deepEqual(extractPlannedWritePaths('Edit `src/kernel.ts` and `README.md`. Then run `npm test`. Never touch `../secret.env`.'), ['src/kernel.ts', 'README.md']);
+});
+
+run('parses only sanitized Agent Kernel grant metadata', () => {
+	assert.deepEqual(parseKernelGrants({ data: [{ id: 'grant-1', rule_key: 'write_file:write', scope: 'always', revoked: false, created_at: 42, secret: 'discard' }] }), [{ id: 'grant-1', ruleKey: 'write_file:write', scope: 'always', revoked: false, createdAt: 42 }]);
+});
+
+run('parses actionable Hermes approval events without retaining command arguments', () => {
+	assert.deepEqual(parseHermesApprovalEvent({ event: 'approval.request', run_id: 'run-1', command: '<write_file> (plugin approval rule)', pattern_key: 'plugin_rule:write_file:write', description: 'This write was not named in the approved plan.', choices: ['once', 'session', 'always', 'deny'] }), {
+		runId: 'run-1', toolName: 'write_file', message: 'This write was not named in the approved plan.', choices: ['once', 'session', 'always', 'deny'],
+	});
+	assert.deepEqual(parseHermesApprovalEvent({ event: 'approval.request', run_id: 'run-2', command: 'redacted command', description: 'A dangerous command requires confirmation.', choices: ['once', 'deny'] }), {
+		runId: 'run-2', toolName: 'Hermes tool', message: 'A dangerous command requires confirmation.', choices: ['once', 'deny'],
+	});
+	assert.equal(parseHermesApprovalEvent({ event: 'tool.started', args: { token: 'secret' } }), null);
+});
+
+run('provides a local-first image workflow and validates safe SVG output', () => {
+	assert.equal(isImageRequest('Crie uma imagem hero para a campanha'), true);
+	assert.equal(isImageRequest('Gere fotos e imagens para a campanha'), true);
+	assert.equal(isImageRequest('Preciso de uma capa para esta campanha'), true);
+	assert.equal(isImageRequest('Resuma este documento'), false);
+	assert.equal(providerCatalog()[0]?.id, 'local-svg');
+	assert.match(imageAuthoringInstruction('Sovereign/Images'), /sovereign-image/);
+	assert.match(imageAuthoringInstruction('Sovereign/Images'), /visual direction/i);
+	const operation = parseImageOperation('```sovereign-image\n{"path":"Campaign/hero.svg","title":"Campaign hero","svg":"<svg xmlns=\\"http://www.w3.org/2000/svg\\" viewBox=\\"0 0 100 100\\"><rect width=\\"100\\" height=\\"100\\" fill=\\"#111\\"/></svg>","alt":"Dark campaign hero"}\n```');
+	assert.equal(operation?.path, 'Campaign/hero.svg');
+	assert.equal(parseImageOperation('```sovereign-image\n{"path":"../bad.svg","title":"Bad","svg":"<svg><script>alert(1)</script></svg>","alt":"Bad"}\n```'), null);
+	assert.equal(parseImageOperation('```sovereign-image\n{"path":"bad.svg","title":"Bad","svg":"<svg xmlns=\\"http://www.w3.org/2000/svg\\"><style>rect{fill:url(https://tracker.example/x)}</style></svg>","alt":"Bad"}\n```'), null);
+	assert.equal(parseImageOperation('```sovereign-image\n{"path":"bad.svg","title":"Bad","svg":"<svg xmlns=\\"http://www.w3.org/2000/svg\\"><image href=\\"file:///etc/passwd\\"/></svg>","alt":"Bad"}\n```'), null);
+	assert.equal(parseImageOperation('```sovereign-image\n{"path":"C:/bad.svg","title":"Bad","svg":"<svg xmlns=\\"http://www.w3.org/2000/svg\\"></svg>","alt":"Bad"}\n```'), null);
+	assert.equal(parseImageOperation('```sovereign-image\n{"path":"bad.svg","title":"Bad","svg":"<!DOCTYPE svg [<!ENTITY xxe SYSTEM \\"file:///etc/passwd\\">]><svg>&xxe;</svg>","alt":"Bad"}\n```'), null);
+});
+
+run('plans bounded local raster optimization without upscaling', () => {
+	assert.deepEqual(computeImageDimensions(4000, 2000, 1200, 1200), { width: 1200, height: 600 });
+	assert.deepEqual(computeImageDimensions(640, 480, 1200, 1200), { width: 640, height: 480 });
+	assert.equal(imageOutputName('Photos/Hero.JPG', 'webp'), 'Hero-optimized.webp');
+	assert.equal(supportedRasterImage('Photos/Hero.JPG'), true);
+	assert.equal(supportedRasterImage('Photos/vector.svg'), false);
+});
 
 function run(name: string, check: () => void): void {
 	check();
@@ -235,6 +300,15 @@ run('detects Hermes job support only from declared capabilities', () => {
 	assert.equal(parseHermesRuntimeStatus({ endpoints: { jobs: true } }, 'capabilities').jobsSupported, true);
 	assert.equal(parseHermesRuntimeStatus({ features: { session_jobs: false } }, 'capabilities').jobsSupported, false);
 	assert.equal(parseHermesRuntimeStatus({ data: [] }, 'models').jobsSupported, null);
+});
+
+run('discovers whether Hermes can actually generate images', () => {
+	assert.deepEqual(parseHermesImageToolset({ data: [
+		{ name: 'image_gen', enabled: true, configured: true, tools: ['image_generate'] },
+		{ name: 'video_gen', enabled: false, configured: true, tools: ['video_generate'] },
+	] }), { available: true, enabled: true, configured: true, tools: ['image_generate'] });
+	assert.deepEqual(parseHermesImageToolset({ data: [{ name: 'image_gen', enabled: false, configured: false, tools: [] }] }), { available: true, enabled: false, configured: false, tools: [] });
+	assert.equal(parseHermesImageToolset({ data: [] }).available, false);
 });
 
 run('parses only advertised Hermes model route aliases', () => {

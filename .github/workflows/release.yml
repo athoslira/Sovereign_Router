@@ -21,10 +21,15 @@ jobs:
                   node-version: 24
                   cache: 'npm'
 
+            - name: Use Python
+              uses: actions/setup-python@v6
+              with:
+                  python-version: '3.11'
+
             - name: Build plugin
               run: |
                   npm ci
-                  npm run build
+                  npm run test:all
 
             - name: Check for optional styles
               id: styles

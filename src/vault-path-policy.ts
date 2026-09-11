@@ -20,9 +20,9 @@ export function vaultOutputPath(root: string, operationPath: string): string {
 	const safeRoot = safeVaultRelativeRoot(root);
 	const candidate = operationPath.trim().replace(/\\/g, '/');
 	if (safeRoot === null || !candidate || candidate.startsWith('/') || /^[A-Za-z]:/.test(candidate) || hasUnsafeSegment(candidate)) {
-		throw new Error('Document output paths must be vault-relative and cannot contain traversal segments.');
+		throw new Error('Output paths must be vault-relative and cannot contain traversal segments.');
 	}
 	const path = normalizeVaultPath(safeRoot ? `${safeRoot}/${candidate}` : candidate);
-	if (path.startsWith('/') || hasUnsafeSegment(path)) throw new Error('Document output path is outside the vault.');
+	if (path.startsWith('/') || hasUnsafeSegment(path)) throw new Error('Output path is outside the vault.');
 	return path;
 }

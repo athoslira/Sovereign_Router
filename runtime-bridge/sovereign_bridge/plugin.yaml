@@ -1,0 +1,14 @@
+name: sovereign-bridge
+version: "1.5.0"
+kind: standalone
+description: "Local Agent Kernel policy, audit, and approval bridge for Sovereign Router."
+author: "Sovereign Router contributors"
+hooks:
+  - on_session_start
+  - on_session_end
+  - pre_tool_call
+  - post_tool_call
+  - pre_approval_request
+  - post_approval_response
+  - subagent_start
+  - subagent_stop

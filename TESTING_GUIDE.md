@@ -58,6 +58,25 @@ API_SERVER_KEY=<segredo-forte>
 6. Deixe a lista de providers permitidos vazia e tente criar um job com provider override: o Router deve negar. Depois adicione explicitamente o perfil em **Permitted Hermes provider overrides** e repita.
 7. Cancele uma execução Hermes no chat. O Router deve interromper o stream e solicitar parada ao runtime; trate a interrupção como não reversível para operações externas.
 
+### 6. Agent Kernel
+
+1. Execute `npm run test:bridge` para validar política, armazenamento sanitizado, autenticação HTTP e integração dos hooks.
+2. Instale e habilite `runtime-bridge/sovereign_bridge` conforme `docs/AGENT_KERNEL.md`, usando a mesma chave da API Hermes em `SOVEREIGN_BRIDGE_API_KEY`.
+3. Configure ao menos uma raiz permitida e selecione **Enable Agent Kernel**.
+4. Em **Control**, selecione **Test bridge**. O cartão deve informar a versão e o número de aprovações pendentes.
+   O painel também deve listar apenas resumos sanitizados dos eventos recentes e os grants ativos; **Revoke** deve bloquear novamente a regra correspondente.
+5. Em uma sessão Hermes, leia um arquivo dentro da raiz: a política deve permitir. Tente sair da raiz com `..`: a política deve bloquear.
+6. Solicite escrita não prevista ou `image_generate`: o modal do Obsidian deve oferecer **Allow once**, **Allow for session**, **Always allow rule** e **Deny**; o run deve continuar somente depois da resposta.
+7. Pare o bridge e tente iniciar um novo run governado. O run não deve começar. Desabilite o kernel e confirme que os fluxos legados continuam disponíveis.
+
+### 7. Imagens
+
+1. Sem provedor de imagem, peça para criar um banner SVG. O arquivo deve ser salvo sob **Image output root**, acompanhado por `.provenance.md`.
+2. Confirme que SVG com `<script>`, `foreignObject`, handler `onclick`, URL remota, `data:` ou caminho `..` é rejeitado.
+3. Abra um PNG/JPEG/WebP e execute **Sovereign Router: Optimize active image**. Confirme redimensionamento sem upscale, arquivo separado e proveniência local.
+4. Em **Control → Test connection**, confirme que o status distingue Hermes `image_gen` ausente, desabilitado, sem chave e pronto.
+5. Confirme que os bytes da imagem local não aparecem em tráfego de rede; somente um provedor Hermes explicitamente usado após aprovação pode recebê-los.
+
 ## Verificação de porta e exposição
 
 No PowerShell, verifique que o Hermes está ouvindo apenas no loopback:
@@ -69,10 +88,12 @@ Get-NetTCPConnection -LocalPort 8642 -ErrorAction SilentlyContinue |
 
 O endereço esperado é `127.0.0.1` ou `::1`. Não publique essa porta diretamente na internet. Se for indispensável acesso remoto, use VPN ou túnel autenticado e mantenha `API_SERVER_KEY` forte.
 
+Repita a verificação para a porta 8643 quando o Agent Kernel estiver habilitado. Ela também deve escutar apenas em loopback.
+
 ## Critérios de aceite
 
 - Build e testes automatizados passam.
 - Não há chave em `data.json`, Markdown ou logs do plugin.
-- O plugin não abre portas nem inicia processos; ele apenas consome APIs autorizadas.
+- O plugin Obsidian não abre portas nem inicia processos. O plugin opcional do Hermes abre somente a API autenticada em loopback na porta 8643.
 - OpenRouter, GitHub, Docling, Hermes e MCP seguem HTTPS ou loopback HTTP conforme aplicável.
 - Ações Hermes e MCP com efeito externo exigem confirmação ou seguem as políticas do runtime Hermes.

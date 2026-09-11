@@ -1,7 +1,8 @@
 import { App, TFolder, normalizePath } from 'obsidian';
 import { completeExecutor } from './openrouter';
 import type { SovereignRouterSettings } from './settings';
-import { HermesClient } from './hermes';
+import { HermesClient, type HermesApprovalChoice, type HermesApprovalRequest } from './hermes';
+import { AgentKernelClient, extractPlannedWritePaths, type ExecutionEnvelopeV1 } from './agent-kernel';
 import { canTransitionWorkItem, createWorkEvent, plannerPrompt, verifierPrompt, workArtifactPath, type WorkArtifactKind, type WorkItem, type WorkStatus, type WorkWorkspaceMode } from './work-protocol';
 import { WorkStore } from './work-store';
 
@@ -40,7 +41,7 @@ export class WorkService {
 		return item;
 	}
 
-	async execute(item: WorkItem, apiKey: string, onUpdate: (text: string) => void, signal: AbortSignal): Promise<WorkItem> {
+	async execute(item: WorkItem, apiKey: string, onUpdate: (text: string) => void, signal: AbortSignal, approve?: (request: HermesApprovalRequest) => Promise<HermesApprovalChoice>): Promise<WorkItem> {
 		this.assertTransition(item, 'running');
 		const client = new HermesClient(this.settings.hermesServiceUrl, apiKey);
 		const plan = await this.readArtifact(item, 'plan');
@@ -49,15 +50,48 @@ export class WorkService {
 		item.events.push(createWorkEvent('started', 'Hermes execution started.'));
 		await this.store.save(item);
 		let output = '';
+		let kernel: { client: AgentKernelClient; executionId: string } | null = null;
 		try {
+			if (this.settings.agentKernelEnabled) {
+				if (!this.settings.agentKernelAllowedRoots.length) throw new Error('Configure at least one Agent Kernel allowed root before governed execution.');
+				const kernelClient = new AgentKernelClient(this.settings.agentKernelBridgeUrl, apiKey);
+				await kernelClient.health(signal);
+				const executionId = `${item.id}-${Date.now()}`;
+				const envelope: ExecutionEnvelopeV1 = { version: 1, id: executionId, sessionId: item.id, mode: 'governed', allowedRoots: this.settings.agentKernelAllowedRoots, plannedWritePaths: extractPlannedWritePaths(plan || ''), capabilities: ['tools', 'subagents'] };
+				await kernelClient.createExecution(envelope, signal);
+				kernel = { client: kernelClient, executionId };
+			}
 			const run = await client.startRun(item.requirement, item.id, instructions, this.settings.hermesDefaultModelAlias, signal);
+			if (kernel) {
+				try { await kernel.client.bindRun(kernel.executionId, run.id, signal); }
+				catch (error) {
+					try { await client.stopRun(run.id); } catch { /* Preserve the binding failure. */ }
+					throw error;
+				}
+			}
 			item.events.push(createWorkEvent('note', 'Hermes run identifier received.', null, run.id));
 			await this.store.save(item);
-			await client.streamRun(run.id, { onDelta: (text) => { output += text; onUpdate(text); }, onStatus: (status) => onUpdate(`\n[${status}]\n`) }, signal);
+			const pending = new Set<string>();
+			await client.streamRun(run.id, {
+				onDelta: (text) => { output += text; onUpdate(text); },
+				onStatus: (status) => onUpdate(`\n[${status}]\n`),
+				onApproval: (request) => {
+					if (pending.has(request.runId)) return;
+					pending.add(request.runId);
+					void (approve ? approve(request) : Promise.resolve<HermesApprovalChoice>('deny'))
+						.then((choice) => client.approveRun(request.runId, choice, false, signal))
+						.catch((error: unknown) => onUpdate(`\n[Approval failed: ${error instanceof Error ? error.message : 'unknown error'}]\n`))
+						.finally(() => pending.delete(request.runId));
+				},
+			}, signal);
+			if (kernel) await kernel.client.checkpoint(kernel.executionId, 'completed', signal);
 			await this.writeArtifact(item, 'execution', output || '# Execution evidence\n\nHermes completed without textual output.', null);
 			item.status = 'verifying';
 			item.events.push(createWorkEvent('note', 'Hermes execution finished; verification is required.', null, run.id));
 		} catch (error) {
+			if (kernel && !signal.aborted) {
+				try { await kernel.client.checkpoint(kernel.executionId, 'failed', signal); } catch { /* Preserve the execution error. */ }
+			}
 			item.status = signal.aborted ? 'blocked' : 'failed';
 			item.events.push(createWorkEvent(signal.aborted ? 'blocked' : 'failed', signal.aborted ? 'Execution was cancelled.' : error instanceof Error ? error.message : 'Hermes execution failed.'));
 			throw error;

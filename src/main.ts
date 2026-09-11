@@ -11,6 +11,8 @@ import { openControlCenter } from './ui/control-center-modal';
 import { VaultContextIndex } from './vault-context-index';
 import { LocalContextStore } from './local-context-store';
 import { WorkStore } from './work-store';
+import { openImageLab } from './ui/image-lab-modal';
+import { safeVaultRelativeRoot } from './vault-path-policy';
 
 export default class SovereignRouterPlugin extends Plugin {
 	settings!: SovereignRouterSettings;
@@ -69,6 +71,11 @@ export default class SovereignRouterPlugin extends Plugin {
 			name: 'Open work items',
 			callback: () => openControlCenter(this.app, this),
 		});
+		this.addCommand({
+			id: 'optimize-active-image',
+			name: 'Optimize active image',
+			callback: () => openImageLab(this.app, this.settings.imageOutputRoot),
+		});
 		this.addSettingTab(new SovereignRouterSettingTab(this.app, this));
 		void this.refreshModelCatalogIfDue();
 		void this.refreshHermesModelRoutesIfConfigured();
@@ -114,6 +121,11 @@ export default class SovereignRouterPlugin extends Plugin {
 		this.settings.canvasMaxImages = Math.max(1, this.settings.canvasMaxImages ?? 8);
 		this.settings.canvasMaxImageBytes = Math.max(1_000_000, this.settings.canvasMaxImageBytes ?? 6 * 1024 * 1024);
 		this.settings.workItemOutputRoot = this.settings.workItemOutputRoot ?? 'Sovereign/Tasks';
+		this.settings.agentKernelEnabled = this.settings.agentKernelEnabled ?? false;
+		this.settings.agentKernelBridgeUrl = this.settings.agentKernelBridgeUrl ?? 'http://127.0.0.1:8643';
+		this.settings.agentKernelAllowedRoots = this.settings.agentKernelAllowedRoots ?? [];
+		this.settings.imageAuthoringEnabled = this.settings.imageAuthoringEnabled ?? true;
+		this.settings.imageOutputRoot = safeVaultRelativeRoot(this.settings.imageOutputRoot ?? 'Sovereign/Images') || 'Sovereign/Images';
 	}
 
 	async saveSettings(): Promise<void> {

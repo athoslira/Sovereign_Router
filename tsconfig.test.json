@@ -8,5 +8,5 @@
     "module": "ESNext",
     "moduleResolution": "bundler"
   },
-  "include": ["src/canvas.ts", "src/context-search.ts", "src/context-serialization.ts", "src/document-context.ts", "src/document-files.ts", "src/model-catalog.ts", "src/models.ts", "src/routing.ts", "src/skill-policy.ts", "src/sse.ts", "src/types.ts", "src/vault-path-policy.ts", "src/work-protocol.ts", "tests/**/*.ts"]
+  "include": ["src/agent-kernel.ts", "src/canvas.ts", "src/context-search.ts", "src/context-serialization.ts", "src/document-context.ts", "src/document-files.ts", "src/image-processing.ts", "src/image-workflow.ts", "src/model-catalog.ts", "src/models.ts", "src/routing.ts", "src/skill-policy.ts", "src/sse.ts", "src/types.ts", "src/vault-path-policy.ts", "src/work-protocol.ts", "tests/**/*.ts"]
 }

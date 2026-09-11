@@ -24,6 +24,10 @@ import { extractRequestedSkill } from '../requested-skill';
 import { documentAuthoringInstruction, isDocumentRequest, parseDocumentOperation, stripDocumentOperation } from '../document-authoring';
 import { VaultDocumentWriter } from '../vault-document-writer';
 import { serializeMcpToolResult } from '../context-serialization';
+import { AgentKernelClient, type ExecutionEnvelopeV1 } from '../agent-kernel';
+import { imageAuthoringInstruction, isImageRequest, parseImageOperation, stripImageOperation } from '../image-workflow';
+import { VaultImageWriter } from '../vault-image-writer';
+import { chooseHermesApproval } from './hermes-approval-modal';
 
 export const VIEW_TYPE_SOVEREIGN_ROUTER = 'sovereign-router-chat';
 
@@ -118,6 +122,7 @@ export class SovereignRouterView extends ItemView {
 	private mcpToggle!: HTMLInputElement;
 	private attachButton!: HTMLButtonElement;
 	private canvasButton!: HTMLButtonElement;
+	private readonly pendingApprovalRuns = new Set<string>();
 	private folderButton!: HTMLButtonElement;
 	private sendButton!: HTMLButtonElement;
 	private cancelButton!: HTMLButtonElement;
@@ -626,6 +631,7 @@ export class SovereignRouterView extends ItemView {
 					this.setAssistantContent(session, assistant, assistantText);
 				});
 				await this.applyDocumentOperation(session, question, assistant);
+				await this.applyImageOperation(session, question, assistant);
 				return;
 			}
 			if (!apiKey) throw new OpenRouterError('OpenRouter API key is unavailable.');
@@ -636,6 +642,7 @@ export class SovereignRouterView extends ItemView {
 					this.setAssistantContent(session, assistant, assistantText);
 				});
 				await this.applyDocumentOperation(session, question, assistant);
+				await this.applyImageOperation(session, question, assistant);
 				return;
 			}
 			this.setAssistantMeta(session, assistant, route.note || `Using ${modelLabel(route.model)} for this session.`);
@@ -657,7 +664,8 @@ export class SovereignRouterView extends ItemView {
 			}
 			const localContext = await this.localContextFor(session, question);
 			const authoringInstruction = this.plugin.settings.automaticDocumentAuthoring && isDocumentRequest(question) ? documentAuthoringInstruction() : null;
-			const documentContext = [attachedContext, vaultContext, localContext, authoringInstruction].filter((value): value is string => Boolean(value)).join('\n\n---\n\n') || null;
+			const imageInstruction = this.plugin.settings.imageAuthoringEnabled && isImageRequest(question) ? imageAuthoringInstruction(this.plugin.settings.imageOutputRoot) : null;
+			const documentContext = [attachedContext, vaultContext, localContext, authoringInstruction, imageInstruction].filter((value): value is string => Boolean(value)).join('\n\n---\n\n') || null;
 			const executionModel = this.canvasExecutionModel(session, route.model);
 			const visual = await this.canvasVisualInputs(session, executionModel);
 			if (executionModel !== route.model) {
@@ -690,6 +698,7 @@ export class SovereignRouterView extends ItemView {
 				this.setAssistantContent(session, assistant, '');
 			});
 			await this.applyDocumentOperation(session, question, assistant);
+			await this.applyImageOperation(session, question, assistant);
 			assistantText = assistant.message.content;
 			if (this.isActive(session) && assistant.bodyEl?.isConnected) await this.renderMarkdown(assistant.bodyEl, assistantText);
 		} catch (error) {
@@ -754,16 +763,50 @@ export class SovereignRouterView extends ItemView {
 		session.resolvedRuntime = 'hermes';
 		this.refreshSessionUi(session);
 		this.setAssistantMeta(session, assistant, `Hermes Agent | ${hermesModelAlias} | preparing external agent run`);
+		let kernel: { client: AgentKernelClient; executionId: string } | null = null;
+		if (this.plugin.settings.agentKernelEnabled) {
+			if (!this.plugin.settings.agentKernelAllowedRoots.length) throw new HermesError('Configure at least one Agent Kernel allowed root before starting governed Hermes work.');
+			const kernelClient = new AgentKernelClient(this.plugin.settings.agentKernelBridgeUrl, apiKey);
+			await kernelClient.health(signal);
+			const executionId = `${session.id}-${Date.now()}`;
+			const envelope: ExecutionEnvelopeV1 = {
+				version: 1,
+				id: executionId,
+				sessionId: session.id,
+				mode: 'governed',
+				allowedRoots: this.plugin.settings.agentKernelAllowedRoots,
+				plannedWritePaths: [],
+				capabilities: isImageRequest(question) ? ['tools', 'image'] : ['tools'],
+			};
+			await kernelClient.createExecution(envelope, signal);
+			kernel = { client: kernelClient, executionId };
+		}
 		const run = await client.startRun(question, session.id, instructions, hermesModelAlias, signal);
 		session.hermesRunId = run.id;
+		if (kernel) {
+			try { await kernel.client.bindRun(kernel.executionId, run.id, signal); }
+			catch (error) {
+				try { await client.stopRun(run.id); } catch { /* Preserve the binding failure. */ }
+				throw error;
+			}
+		}
 		this.setAssistantMeta(session, assistant, 'Hermes Agent | running tools and streaming output');
-		await client.streamRun(run.id, {
-			onDelta: (text) => {
-				onDelta(text);
-				if (this.isActive(session)) this.scrollToBottom();
-			},
-			onStatus: (status) => this.setAssistantMeta(session, assistant, status),
-		}, signal);
+		try {
+			await client.streamRun(run.id, {
+				onDelta: (text) => {
+					onDelta(text);
+					if (this.isActive(session)) this.scrollToBottom();
+				},
+				onStatus: (status) => this.setAssistantMeta(session, assistant, status),
+				onApproval: (approval) => void this.resolveHermesApproval(client, approval, signal),
+			}, signal);
+			if (kernel) await kernel.client.checkpoint(kernel.executionId, 'completed', signal);
+		} catch (error) {
+			if (kernel && !signal.aborted) {
+				try { await kernel.client.checkpoint(kernel.executionId, 'failed', signal); } catch { /* Preserve the original run error. */ }
+			}
+			throw error;
+		}
 		session.history.push({ role: 'assistant', content: assistant.message.content });
 		if (this.isActive(session) && assistant.bodyEl?.isConnected) await this.renderMarkdown(assistant.bodyEl, assistant.message.content);
 	}
@@ -788,7 +831,21 @@ export class SovereignRouterView extends ItemView {
 		const localContext = await this.localContextFor(session, question);
 		if (localContext) sections.push(`Local persistent context:\n\n${localContext}`);
 		if (this.plugin.settings.automaticDocumentAuthoring && isDocumentRequest(question)) sections.push(documentAuthoringInstruction());
+		if (this.plugin.settings.imageAuthoringEnabled && isImageRequest(question)) sections.push(imageAuthoringInstruction(this.plugin.settings.imageOutputRoot));
 		return sections.join('\n\n');
+	}
+
+	private async resolveHermesApproval(client: HermesClient, approval: import('../hermes').HermesApprovalRequest, signal: AbortSignal): Promise<void> {
+		if (this.pendingApprovalRuns.has(approval.runId)) return;
+		this.pendingApprovalRuns.add(approval.runId);
+		try {
+			const choice = await chooseHermesApproval(this.app, approval);
+			await client.approveRun(approval.runId, choice, false, signal);
+		} catch (error) {
+			new Notice(`Could not resolve Hermes approval: ${formatError(error)}`);
+		} finally {
+			this.pendingApprovalRuns.delete(approval.runId);
+		}
 	}
 
 	private async localContextFor(session: ChatSession, question: string): Promise<string | null> {
@@ -813,6 +870,30 @@ export class SovereignRouterView extends ItemView {
 			this.setAssistantMeta(session, assistant, `Document ${operation.action}: ${path}`);
 		} catch (error) {
 			this.setAssistantContent(session, assistant, `${stripDocumentOperation(assistant.message.content)}\n\n_Document was not written: ${error instanceof Error ? error.message : 'unknown error'}_`);
+		}
+	}
+
+	private async applyImageOperation(session: ChatSession, question: string, assistant: AssistantElements): Promise<void> {
+		if (!this.plugin.settings.imageAuthoringEnabled || !isImageRequest(question)) return;
+		const operation = parseImageOperation(assistant.message.content);
+		if (!operation) return;
+		try {
+			const path = await new VaultImageWriter(this.app, this.plugin.settings.imageOutputRoot).write(operation);
+			this.setAssistantContent(session, assistant, `${stripImageOperation(assistant.message.content)}\n\nCreated or updated: ![[${path}]]`);
+			this.replaceLastAssistantHistory(session, assistant.message.content);
+			this.setAssistantMeta(session, assistant, `Local image created: ${path} · provenance saved`);
+		} catch (error) {
+			this.setAssistantContent(session, assistant, `${stripImageOperation(assistant.message.content)}\n\n_Image was not written: ${error instanceof Error ? error.message : 'unknown error'}_`);
+			this.replaceLastAssistantHistory(session, assistant.message.content);
+		}
+	}
+
+	private replaceLastAssistantHistory(session: ChatSession, content: string): void {
+		for (let index = session.history.length - 1; index >= 0; index -= 1) {
+			const current = session.history[index];
+			if (!current || current.role !== 'assistant') continue;
+			session.history[index] = { ...current, content };
+			return;
 		}
 	}
 
