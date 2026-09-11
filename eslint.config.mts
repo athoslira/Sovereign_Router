@@ -15,7 +15,8 @@ export default defineConfig(
 		'tsconfig.json',
 		'tests/compiled',
 		'tests',
-		'vscode-extension/out',
+		'.worktrees',
+		'vscode-extension',
 		'mcp-connectors/*.mjs',
 	]),
 	{
