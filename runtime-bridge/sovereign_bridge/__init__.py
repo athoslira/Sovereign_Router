@@ -29,7 +29,14 @@ def _execution(identifier: str) -> dict[str, Any] | None:
 
 def _event(name: str, summary: str, *, session_id: str = "", decision: str | None = None) -> None:
     execution = _execution(session_id)
-    if execution and _store: _store.add_event(execution["id"], name, summary, decision)
+    if execution and _store:
+        _store.add_event(execution["id"], name, summary, decision)
+        _store.add_hub_event_for_execution(execution["id"], name, summary)
+
+
+def _hub_transition(execution: dict[str, Any] | None, state: str) -> None:
+    if execution and _store:
+        _store.transition_hub_run_for_execution(execution["id"], state)
 
 
 def _pre_tool_call(tool_name: str = "", args: Any = None, session_id: str = "", task_id: str = "", **_kwargs: Any):
@@ -44,6 +51,7 @@ def _pre_tool_call(tool_name: str = "", args: Any = None, session_id: str = "", 
         if _store and _store.is_revoked(decision.rule_key):
             return {"action": "block", "message": "This previously granted rule was revoked in the Sovereign Agent Kernel."}
         if _store: _store.checkpoint(execution["id"], "waiting")
+        _hub_transition(execution, "awaiting_approval")
         return {"action": "approve", "message": decision.reason, "rule_key": decision.rule_key}
     return None
 
@@ -56,6 +64,7 @@ def _approval_requested(tool_name: str = "", description: str = "", session_id: 
     session = session_id or session_key
     execution = _execution(session)
     if execution and _store: _store.checkpoint(execution["id"], "waiting")
+    _hub_transition(execution, "awaiting_approval")
     summary = description or f"Approval required for {tool_name or 'Hermes tool'}."
     _event("approval.required", summary, session_id=session)
 
@@ -68,15 +77,21 @@ def _approval_responded(choice: str = "", session_id: str = "", session_key: str
         _store.save_grant(pattern_key.removeprefix("plugin_rule:"), choice, grant_session)
     _event("approval.responded", f"Approval resolved with {choice or 'a user choice'}.", session_id=session)
     if execution and _store: _store.checkpoint(execution["id"], "running" if choice != "deny" else "denied")
+    _hub_transition(execution, "running" if choice != "deny" else "cancelled")
 
 
 def _subagent_start(session_id: str = "", **_kwargs: Any) -> None: _event("subagent.started", "A bounded subagent started.", session_id=session_id)
 def _subagent_stop(session_id: str = "", **_kwargs: Any) -> None: _event("subagent.stopped", "A bounded subagent stopped.", session_id=session_id)
-def _session_start(session_id: str = "", **_kwargs: Any) -> None: _event("session.started", "Governed Hermes session started.", session_id=session_id)
+def _session_start(session_id: str = "", **_kwargs: Any) -> None:
+    execution = _execution(session_id)
+    _event("session.started", "Governed Hermes session started.", session_id=session_id)
+    _hub_transition(execution, "running")
+
 def _session_end(session_id: str = "", **_kwargs: Any) -> None:
     execution = _execution(session_id)
     _event("session.completed", "Governed Hermes session completed.", session_id=session_id)
     if execution and _store: _store.checkpoint(execution["id"], "completed")
+    _hub_transition(execution, "verifying")
     if _store: _store.expire_session_grants(session_id)
 
 

@@ -7,10 +7,11 @@ import { openCreateWorkItemModal, confirmWorkExecution } from './work-item-modal
 import { WORK_STATUS_LABELS, type WorkItem } from '../work-protocol';
 import { WorkService } from '../work-service';
 import type { ModelCatalogRefreshHealth } from '../model-catalog';
-import { AgentKernelClient, type KernelGrant, type KernelHealth, type RuntimeEvent } from '../agent-kernel';
+import { AgentKernelClient, type HubEvent, type HubHealth, type HubMcpServer, type HubRun, type HubTask, type KernelGrant, type KernelHealth, type RuntimeEvent } from '../agent-kernel';
 import { providerCatalog } from '../image-workflow';
 import { openImageLab } from './image-lab-modal';
 import { chooseHermesApproval } from './hermes-approval-modal';
+import { openCreateHubTaskModal, openHubVerificationModal } from './hub-task-modal';
 
 function formatDate(value: string | number | null): string {
 	if (!value) return 'Not available';
@@ -50,6 +51,14 @@ class ControlCenterModal extends Modal {
 	private checkingKernel = false;
 	private kernelGrants: KernelGrant[] | null = null;
 	private kernelEvents: RuntimeEvent[] | null = null;
+	private hubHealth: HubHealth | null = null;
+	private hubTasks: HubTask[] | null = null;
+	private hubMcpServers: HubMcpServer[] | null = null;
+	private hubRuns = new Map<string, HubRun[]>();
+	private hubEvents = new Map<string, HubEvent[]>();
+	private hubError: string | null = null;
+	private loadingHub = false;
+	private hubRefreshInterval: number | null = null;
 	private runningWorkId: string | null = null;
 
 	constructor(app: App, private readonly plugin: SovereignRouterPlugin) { super(app); }
@@ -58,9 +67,14 @@ class ControlCenterModal extends Modal {
 		this.modalEl.addClass('sr-control-center-modal');
 		this.titleEl.setText('Sovereign control center');
 		void this.render();
+		if (this.plugin.settings.hubEnabled) this.hubRefreshInterval = window.setInterval(() => { if (!this.loadingHub) void this.refreshHub(); }, 5_000);
 	}
 
-	onClose(): void { this.modalEl.removeClass('sr-control-center-modal'); }
+	onClose(): void {
+		if (this.hubRefreshInterval !== null) window.clearInterval(this.hubRefreshInterval);
+		this.hubRefreshInterval = null;
+		this.modalEl.removeClass('sr-control-center-modal');
+	}
 
 	private async render(): Promise<void> {
 		this.contentEl.empty();
@@ -89,6 +103,8 @@ class ControlCenterModal extends Modal {
 		this.statusCard(status, 'Hermes policy', `${this.plugin.settings.hermesPermittedProviderOverrides.length} permitted provider overrides`, true);
 		const kernelReady = !this.plugin.settings.agentKernelEnabled ? false : Boolean(this.kernelStatus && !this.kernelError);
 		this.statusCard(status, 'Agent Kernel', !this.plugin.settings.agentKernelEnabled ? 'Disabled' : this.kernelError ? 'Connection failed' : this.kernelStatus ? `Connected v${this.kernelStatus.version} · heartbeat ${formatDate(this.kernelStatus.heartbeatAt ? this.kernelStatus.heartbeatAt * 1000 : null)} · ${this.kernelStatus.pendingApprovals} pending approvals` : 'Configured · not checked', kernelReady);
+		const hubReady = this.plugin.settings.hubEnabled && Boolean(this.hubHealth && !this.hubError);
+		this.statusCard(status, 'Sovereign Hub', !this.plugin.settings.hubEnabled ? 'Disabled' : this.hubError ? 'Connection failed' : this.hubHealth ? `${this.hubTasks?.length ?? 0} tasks · ${this.hubMcpServers?.length ?? 0} MCP registries` : 'Configured · not checked', hubReady);
 		const providers = providerCatalog();
 		const hermesImage = this.imageToolset?.available ? this.imageToolset.enabled && this.imageToolset.configured ? 'Hermes ready' : 'Hermes disabled or missing a key' : 'Hermes not inspected';
 		this.statusCard(status, 'Image toolkit', `${providers.filter((provider) => provider.costClass === 'local-free').length} local-free · ${providers.filter((provider) => provider.requiresApproval).length} approval-gated · ${hermesImage}`, true);
@@ -123,6 +139,7 @@ class ControlCenterModal extends Modal {
 			.addButton((button) => button.setButtonText('Open image optimizer').onClick(() => openImageLab(this.app, this.plugin.settings.imageOutputRoot)));
 		this.renderKernelGrants();
 		this.renderKernelEvents();
+		this.renderHub(hermesReady);
 
 		new Setting(this.contentEl)
 			.setName('Policies and connections')
@@ -253,6 +270,7 @@ class ControlCenterModal extends Modal {
 				client.listGrants(),
 				client.listEvents(),
 			]);
+			if (this.plugin.settings.hubEnabled) await this.loadHub(client);
 			new Notice('Agent Kernel bridge is reachable.');
 		} catch (error) {
 			this.kernelStatus = null;
@@ -263,6 +281,112 @@ class ControlCenterModal extends Modal {
 			this.checkingKernel = false;
 			await this.render();
 		}
+	}
+
+	private async loadHub(client?: AgentKernelClient): Promise<void> {
+		if (!this.plugin.settings.hubEnabled) return;
+		const secretName = this.plugin.settings.hermesSecretName;
+		const key = secretName ? this.app.secretStorage.getSecret(secretName) : null;
+		if (!key) return;
+		this.loadingHub = true;
+		this.hubError = null;
+		try {
+			const hubClient = client ?? new AgentKernelClient(this.plugin.settings.agentKernelBridgeUrl, key);
+			const [health, tasks, servers] = await Promise.all([hubClient.hubHealth(), hubClient.listHubTasks(), hubClient.listHubMcpServers()]);
+			this.hubHealth = health;
+			this.hubTasks = tasks;
+			this.hubMcpServers = servers;
+			this.hubRuns = new Map(await Promise.all(tasks.slice(0, 30).map(async (task) => [task.id, await hubClient.listHubRuns(task.id)] as const)));
+			this.hubEvents = new Map(await Promise.all(tasks.slice(0, 30).map(async (task) => [task.id, await hubClient.listHubEvents(task.id)] as const)));
+		} catch (error) {
+			this.hubHealth = null;
+			this.hubTasks = null;
+			this.hubMcpServers = null;
+			this.hubRuns.clear();
+			this.hubEvents.clear();
+			this.hubError = formatError(error);
+		} finally { this.loadingHub = false; }
+	}
+
+	private hubClient(): AgentKernelClient | null {
+		const secretName = this.plugin.settings.hermesSecretName;
+		const key = secretName ? this.app.secretStorage.getSecret(secretName) : null;
+		return key ? new AgentKernelClient(this.plugin.settings.agentKernelBridgeUrl, key) : null;
+	}
+
+	private renderHub(hermesReady: boolean): void {
+		if (!this.plugin.settings.hubEnabled) return;
+		const section = this.contentEl.createDiv({ cls: 'sr-control-work' });
+		section.createEl('h3', { text: 'Sovereign Hub' });
+		section.createEl('p', { text: 'Durable tasks and governed Hermes runs. The Hub records safe lifecycle state; it never stores secrets, raw commands, or hidden chat prompts.' });
+		const actions = section.createDiv({ cls: 'sr-control-job-actions' });
+		const refresh = actions.createEl('button', { text: this.loadingHub ? 'Refreshing...' : 'Refresh Hub' });
+		refresh.disabled = this.loadingHub || !hermesReady;
+		refresh.addEventListener('click', () => void this.refreshHub());
+		const create = actions.createEl('button', { text: 'New Hub task' });
+		create.disabled = !hermesReady;
+		create.addEventListener('click', () => this.openCreateHubTask());
+		if (this.hubError) section.createEl('p', { text: this.hubError, cls: 'sr-control-error' });
+		if (this.hubTasks === null) { section.createEl('p', { text: 'Select Refresh Hub or test the bridge to load local Hub tasks.' }); return; }
+		if (!this.hubTasks.length) section.createEl('p', { text: 'No Hub tasks yet. Hermes sessions are recorded here when both Agent Kernel and Sovereign Hub are enabled.' });
+		for (const task of this.hubTasks) this.renderHubTask(section, task);
+		const registry = section.createEl('details', { cls: 'sr-work-events' });
+		registry.createEl('summary', { text: `MCP registry (${this.hubMcpServers?.length ?? 0})` });
+		for (const server of this.hubMcpServers ?? []) registry.createDiv({ text: `${server.name} · ${server.transport} · ${server.tools.length} scoped tools`, cls: 'sr-control-job-meta' });
+	}
+
+	private renderHubTask(container: HTMLElement, task: HubTask): void {
+		const row = container.createDiv({ cls: 'sr-control-work-item' });
+		const heading = row.createDiv({ cls: 'sr-control-work-heading' });
+		heading.createEl('strong', { text: task.title });
+		heading.createSpan({ text: task.state.replace(/_/g, ' '), cls: `sr-work-status is-${task.state}` });
+		if (task.summary) row.createDiv({ text: task.summary, cls: 'sr-control-work-requirement' });
+		const runs = this.hubRuns.get(task.id) ?? [];
+		const latest = runs[0];
+		row.createDiv({ text: `${task.kind} · updated ${formatDate(task.updatedAt * 1000)}${latest ? ` · ${latest.executor || 'runtime'}${latest.model ? ` · ${latest.model}` : ''}` : ''}`, cls: 'sr-control-job-meta' });
+		const actions = row.createDiv({ cls: 'sr-control-job-actions' });
+		if (task.state === 'draft') actions.createEl('button', { text: 'Plan' }).addEventListener('click', () => void this.transitionHubTask(task.id, 'planned'));
+		if (task.state === 'verifying' && latest) actions.createEl('button', { text: 'Verify run', cls: 'mod-cta' }).addEventListener('click', () => this.openVerifyHubRun(latest));
+		const events = this.hubEvents.get(task.id) ?? [];
+		if (events.length) {
+			const history = row.createEl('details', { cls: 'sr-work-events' });
+			history.createEl('summary', { text: `Hub history (${events.length})` });
+			for (const event of events.slice(0, 8)) history.createDiv({ text: `${formatDate(event.createdAt * 1000)} · ${event.summary}`, cls: 'sr-control-job-meta' });
+		}
+	}
+
+	private async refreshHub(): Promise<void> {
+		await this.loadHub();
+		await this.render();
+	}
+
+	private openCreateHubTask(): void {
+		openCreateHubTaskModal(this.app, async (input) => {
+			const client = this.hubClient();
+			if (!client) return false;
+			try {
+				await client.createHubTask(input.title, input.kind, input.summary);
+				new Notice('Hub task created as a durable planning record. It does not start Hermes by itself.');
+				await this.refreshHub();
+				return true;
+			} catch (error) { new Notice(`Could not create Hub task: ${formatError(error)}`); return false; }
+		});
+	}
+
+	private async transitionHubTask(taskId: string, state: 'planned'): Promise<void> {
+		const client = this.hubClient();
+		if (!client) return;
+		try { await client.transitionHubTask(taskId, state); new Notice('Hub task marked as planned. It remains a local planning record until a future execution is linked.'); await this.refreshHub(); }
+		catch (error) { new Notice(`Could not update Hub task: ${formatError(error)}`); }
+	}
+
+	private openVerifyHubRun(run: HubRun): void {
+		openHubVerificationModal(this.app, async (input) => {
+			const client = this.hubClient();
+			if (!client) return false;
+			try { await client.verifyHubRun(run.id, input.verdict, input.evidenceSummary); new Notice(`Hub run marked ${input.verdict}.`); await this.refreshHub(); return true; }
+			catch (error) { new Notice(`Could not verify Hub run: ${formatError(error)}`); return false; }
+		});
 	}
 
 	private renderKernelEvents(): void {

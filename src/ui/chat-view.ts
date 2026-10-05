@@ -24,10 +24,11 @@ import { extractRequestedSkill } from '../requested-skill';
 import { documentAuthoringInstruction, isDocumentRequest, parseDocumentOperation, stripDocumentOperation } from '../document-authoring';
 import { VaultDocumentWriter } from '../vault-document-writer';
 import { serializeMcpToolResult } from '../context-serialization';
-import { AgentKernelClient, type ExecutionEnvelopeV1 } from '../agent-kernel';
+import { AgentKernelClient, type ExecutionEnvelopeV1, type HubTaskKind } from '../agent-kernel';
 import { imageAuthoringInstruction, isImageRequest, parseImageOperation, stripImageOperation } from '../image-workflow';
 import { VaultImageWriter } from '../vault-image-writer';
 import { chooseHermesApproval } from './hermes-approval-modal';
+import { isVideoRequest, videoAuthoringInstruction } from '../video-workflow';
 
 export const VIEW_TYPE_SOVEREIGN_ROUTER = 'sovereign-router-chat';
 
@@ -103,6 +104,15 @@ function formatUsage(model: string, usage?: Usage, suffix?: string): string {
 	if ((usage?.prompt_tokens_details?.cached_tokens ?? 0) > 0) parts.push('cache hit');
 	if (suffix) parts.push(suffix);
 	return parts.join(' | ');
+}
+
+function hubTaskKind(question: string): HubTaskKind {
+	if (isVideoRequest(question)) return 'media';
+	if (/\b(?:code|c[oó]digo|typescript|python|bug|test|refactor|worktree)\b/i.test(question)) return 'code';
+	if (/\b(?:automat(?:e|ion|izar|iza[çc][aã]o)|schedule|cron|job)\b/i.test(question)) return 'automation';
+	if (/\b(?:research|pesquis|search|fontes?|sources?)\b/i.test(question)) return 'research';
+	if (/\b(?:analy[sz]e|an[aá]lis[ea])\b/i.test(question)) return 'analysis';
+	return 'general';
 }
 
 export class SovereignRouterView extends ItemView {
@@ -665,7 +675,10 @@ export class SovereignRouterView extends ItemView {
 			const localContext = await this.localContextFor(session, question);
 			const authoringInstruction = this.plugin.settings.automaticDocumentAuthoring && isDocumentRequest(question) ? documentAuthoringInstruction() : null;
 			const imageInstruction = this.plugin.settings.imageAuthoringEnabled && isImageRequest(question) ? imageAuthoringInstruction(this.plugin.settings.imageOutputRoot) : null;
-			const documentContext = [attachedContext, vaultContext, localContext, authoringInstruction, imageInstruction].filter((value): value is string => Boolean(value)).join('\n\n---\n\n') || null;
+			const videoInstruction = this.plugin.settings.videoWorkflowEnabled && isVideoRequest(question)
+				? 'This is a programmatic video request. Rendering is available only through a configured Hermes session with approved tools; do not claim that a video file was created in this chat runtime.'
+				: null;
+			const documentContext = [attachedContext, vaultContext, localContext, authoringInstruction, imageInstruction, videoInstruction].filter((value): value is string => Boolean(value)).join('\n\n---\n\n') || null;
 			const executionModel = this.canvasExecutionModel(session, route.model);
 			const visual = await this.canvasVisualInputs(session, executionModel);
 			if (executionModel !== route.model) {
@@ -764,6 +777,7 @@ export class SovereignRouterView extends ItemView {
 		this.refreshSessionUi(session);
 		this.setAssistantMeta(session, assistant, `Hermes Agent | ${hermesModelAlias} | preparing external agent run`);
 		let kernel: { client: AgentKernelClient; executionId: string } | null = null;
+		let hubRun: { client: AgentKernelClient; runId: string } | null = null;
 		if (this.plugin.settings.agentKernelEnabled) {
 			if (!this.plugin.settings.agentKernelAllowedRoots.length) throw new HermesError('Configure at least one Agent Kernel allowed root before starting governed Hermes work.');
 			const kernelClient = new AgentKernelClient(this.plugin.settings.agentKernelBridgeUrl, apiKey);
@@ -776,10 +790,20 @@ export class SovereignRouterView extends ItemView {
 				mode: 'governed',
 				allowedRoots: this.plugin.settings.agentKernelAllowedRoots,
 				plannedWritePaths: [],
-				capabilities: isImageRequest(question) ? ['tools', 'image'] : ['tools'],
+				capabilities: ['tools', ...(isImageRequest(question) ? ['image'] : []), ...(isVideoRequest(question) ? ['video-render'] : [])],
 			};
 			await kernelClient.createExecution(envelope, signal);
 			kernel = { client: kernelClient, executionId };
+			if (this.plugin.settings.hubEnabled) {
+				try {
+					const task = await kernelClient.createHubTask(`Hermes session ${session.number}`, hubTaskKind(question), '', signal);
+					await kernelClient.transitionHubTask(task.id, 'planned', signal);
+					const run = await kernelClient.createHubRun(task.id, 'hermes', resolvedRoute?.model ?? null, signal);
+					hubRun = { client: kernelClient, runId: run.id };
+				} catch {
+					this.setAssistantMeta(session, assistant, 'Sovereign Hub is unavailable; continuing with the governed Hermes fallback.');
+				}
+			}
 		}
 		const run = await client.startRun(question, session.id, instructions, hermesModelAlias, signal);
 		session.hermesRunId = run.id;
@@ -789,6 +813,10 @@ export class SovereignRouterView extends ItemView {
 				try { await client.stopRun(run.id); } catch { /* Preserve the binding failure. */ }
 				throw error;
 			}
+		}
+		if (hubRun && kernel) {
+			try { await hubRun.client.bindHubRun(hubRun.runId, kernel.executionId, run.id, signal); }
+			catch { this.setAssistantMeta(session, assistant, 'Hermes is running, but this run could not be attached to the Sovereign Hub.'); }
 		}
 		this.setAssistantMeta(session, assistant, 'Hermes Agent | running tools and streaming output');
 		try {
@@ -832,6 +860,7 @@ export class SovereignRouterView extends ItemView {
 		if (localContext) sections.push(`Local persistent context:\n\n${localContext}`);
 		if (this.plugin.settings.automaticDocumentAuthoring && isDocumentRequest(question)) sections.push(documentAuthoringInstruction());
 		if (this.plugin.settings.imageAuthoringEnabled && isImageRequest(question)) sections.push(imageAuthoringInstruction(this.plugin.settings.imageOutputRoot));
+		if (this.plugin.settings.videoWorkflowEnabled && isVideoRequest(question)) sections.push(videoAuthoringInstruction(this.plugin.settings.videoOutputRoot, question));
 		return sections.join('\n\n');
 	}
 
@@ -931,7 +960,8 @@ export class SovereignRouterView extends ItemView {
 	}
 
 	private async routeForSession(session: ChatSession, question: string, apiKey: string): Promise<RouteResult> {
-		if (session.model && session.resolvedRuntime !== 'hermes') {
+		const forceVideoRuntime = this.plugin.settings.videoWorkflowEnabled && isVideoRequest(question) && session.runtime === 'auto' && this.hasHermesCredentials();
+		if (session.model && session.resolvedRuntime !== 'hermes' && !forceVideoRuntime) {
 			return {
 				model: session.model,
 				hermesModel: null,
@@ -975,6 +1005,14 @@ export class SovereignRouterView extends ItemView {
 		else if (requested && session.runtime === 'auto' && this.hasHermesCredentials()) {
 			const hermesRoute = this.plugin.settings.hermesModelRoutes.find((candidate) => candidate.alias === this.plugin.settings.hermesDefaultModelAlias);
 			if (hermesRoute && this.plugin.settings.permittedExecutorModels.includes(hermesRoute.model)) route = { ...route, model: hermesRoute.model, hermesModel: hermesRoute.alias, runtime: 'hermes', note: `Using Hermes for requested skill: ${requested.name}.` };
+		}
+		if (this.plugin.settings.videoWorkflowEnabled && isVideoRequest(question) && session.runtime === 'auto' && this.hasHermesCredentials()) {
+			const hermesRoute = this.plugin.settings.hermesModelRoutes.find((candidate) => candidate.alias === this.plugin.settings.hermesDefaultModelAlias);
+			if (hermesRoute && this.plugin.settings.permittedExecutorModels.includes(hermesRoute.model)) {
+				route = { ...route, model: hermesRoute.model, hermesModel: hermesRoute.alias, runtime: 'hermes', note: 'Programmatic video rendering requires Hermes; using the default Hermes route.' };
+				session.resolvedRuntime = 'hermes';
+				session.hermesModelAlias = hermesRoute.alias;
+			}
 		}
 		session.skill = route.skill;
 		session.context = route.context;

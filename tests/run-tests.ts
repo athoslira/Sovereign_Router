@@ -22,10 +22,11 @@ import { canTransitionWorkItem, createWorkEvent, plannerPrompt, safeWorkOutputRo
 import { SseParser } from '../src/sse';
 import { serializeMcpToolResult, serializeStructuredContext } from '../src/context-serialization';
 import type { SovereignRouterSettings } from '../src/settings';
-import { AgentKernelClient, extractPlannedWritePaths, parseKernelGrants, parseKernelHealth, parseRuntimeEvents } from '../src/agent-kernel';
+import { AgentKernelClient, extractPlannedWritePaths, parseHubEvents, parseHubHealth, parseHubMcpServers, parseHubRuns, parseHubTasks, parseKernelGrants, parseKernelHealth, parseRuntimeEvents } from '../src/agent-kernel';
 import { imageAuthoringInstruction, isImageRequest, parseImageOperation, providerCatalog } from '../src/image-workflow';
 import { parseHermesApprovalEvent } from '../src/hermes';
 import { computeImageDimensions, imageOutputName, supportedRasterImage } from '../src/image-processing';
+import { isVideoRequest, selectVideoEngine, videoAuthoringInstruction, videoSkillHint } from '../src/video-workflow';
 
 const settings: SovereignRouterSettings = {
 	openRouterSecretName: '',
@@ -62,10 +63,13 @@ const settings: SovereignRouterSettings = {
 	workItemOutputRoot: 'Sovereign/Tasks',
 	mcpServers: [],
 	agentKernelEnabled: false,
+	hubEnabled: false,
 	agentKernelBridgeUrl: 'http://127.0.0.1:8643',
 	agentKernelAllowedRoots: [],
 	imageAuthoringEnabled: true,
 	imageOutputRoot: 'Sovereign/Images',
+	videoWorkflowEnabled: true,
+	videoOutputRoot: 'Sovereign/Videos',
 };
 
 run('normalizes Agent Kernel health and sanitized runtime events', () => {
@@ -122,6 +126,26 @@ run('plans bounded local raster optimization without upscaling', () => {
 	assert.equal(imageOutputName('Photos/Hero.JPG', 'webp'), 'Hero-optimized.webp');
 	assert.equal(supportedRasterImage('Photos/Hero.JPG'), true);
 	assert.equal(supportedRasterImage('Photos/vector.svg'), false);
+});
+
+run('normalizes the Sovereign Hub task, run, event, and MCP contracts', () => {
+	assert.deepEqual(parseHubHealth({ status: 'ok', version: '1.6.0', task_protocol: 1, execution_adapter: true, mcp_registry: true }), { status: 'ok', version: '1.6.0', taskProtocol: 1, executionAdapter: true, mcpRegistry: true });
+	assert.equal(parseHubTasks({ data: [{ id: 'task-1', title: 'Test task', kind: 'code', summary: '', state: 'running', created_at: 1, updated_at: 2 }] })[0]?.kind, 'code');
+	assert.equal(parseHubRuns({ data: [{ id: 'run-1', task_id: 'task-1', state: 'verifying', executor: 'hermes', model: null, hermes_run_id: 'h-1', execution_id: 'e-1', created_at: 1, updated_at: 2 }] })[0]?.state, 'verifying');
+	assert.equal(parseHubEvents({ data: [{ id: 1, task_id: 'task-1', run_id: null, type: 'run.bound', summary: 'safe', created_at: 1 }] })[0]?.type, 'run.bound');
+	assert.equal(parseHubMcpServers({ data: [{ id: 'mcp-1', name: 'Read only', transport: 'stdio', server_ref: 'hermes.read', state: 'registered', tools: [{ name: 'read', read_only: true, external_effect: false }] }] })[0]?.tools[0]?.readOnly, true);
+	assert.deepEqual(parseHubTasks({ data: [{ id: 'bad', title: 'bad', kind: 'unknown', summary: '', state: 'draft', created_at: 1, updated_at: 1 }] }), []);
+});
+
+run('classifies programmatic video requests and creates governed renderer instructions', () => {
+	assert.equal(isVideoRequest('Crie um vídeo explicativo em MP4 usando código.'), true);
+	assert.equal(isVideoRequest('Explique como funciona o Remotion.'), false);
+	assert.equal(isVideoRequest('Resuma este documento'), false);
+	assert.equal(selectVideoEngine('Animate a calculus equation with a graph.'), 'manim');
+	assert.equal(selectVideoEngine('Create a vertical 9:16 product video for Reels.'), 'remotion');
+	assert.equal(videoSkillHint('Create a vertical TikTok video.'), 'short-form-video');
+	assert.match(videoAuthoringInstruction('Sovereign/Videos', 'Create a brand explainer video.'), /Remotion/);
+	assert.match(videoAuthoringInstruction('Sovereign/Videos', 'Create a physics animation.'), /Manim/);
 });
 
 function run(name: string, check: () => void): void {

@@ -122,10 +122,13 @@ export default class SovereignRouterPlugin extends Plugin {
 		this.settings.canvasMaxImageBytes = Math.max(1_000_000, this.settings.canvasMaxImageBytes ?? 6 * 1024 * 1024);
 		this.settings.workItemOutputRoot = this.settings.workItemOutputRoot ?? 'Sovereign/Tasks';
 		this.settings.agentKernelEnabled = this.settings.agentKernelEnabled ?? false;
+		this.settings.hubEnabled = this.settings.hubEnabled ?? false;
 		this.settings.agentKernelBridgeUrl = this.settings.agentKernelBridgeUrl ?? 'http://127.0.0.1:8643';
 		this.settings.agentKernelAllowedRoots = this.settings.agentKernelAllowedRoots ?? [];
 		this.settings.imageAuthoringEnabled = this.settings.imageAuthoringEnabled ?? true;
 		this.settings.imageOutputRoot = safeVaultRelativeRoot(this.settings.imageOutputRoot ?? 'Sovereign/Images') || 'Sovereign/Images';
+		this.settings.videoWorkflowEnabled = this.settings.videoWorkflowEnabled ?? true;
+		this.settings.videoOutputRoot = safeVaultRelativeRoot(this.settings.videoOutputRoot ?? 'Sovereign/Videos') || 'Sovereign/Videos';
 	}
 
 	async saveSettings(): Promise<void> {

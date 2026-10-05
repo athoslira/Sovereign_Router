@@ -49,6 +49,12 @@ Use **Sovereign Router: Open control center** from the command palette, or selec
 
 The control center intentionally does not expose a terminal, local stdio MCPs, or unrestricted file access through the Obsidian plugin. It governs those capabilities through Hermes rather than duplicating them.
 
+### Sovereign Hub
+
+Enable **Sovereign Hub** under **Settings → Sovereign Router → Agent Kernel** to add durable, local task records to governed Hermes work. The Control center then shows the task lifecycle, bound Hermes runs, sanitized event history, registered MCP schemas, and the final evidence review. A completed Hermes run is intentionally held in **verifying** until you mark its evidence as pass or fail.
+
+Hub data stays in the local Agent Kernel SQLite store. It contains only deliberate, non-secret task labels and summaries plus safe lifecycle metadata; it does not store prompts, vault text, raw tool arguments, credentials, or execute tools itself. If the Hub is unavailable, an approved governed Hermes run still follows the existing safe fallback. The detailed boundary and rollout are in [the Sovereign Hub roadmap](docs/SOVEREIGN_HUB_ROADMAP.md).
+
 Every message exposes a **Copy** button: user messages copy the submitted prompt and assistant messages copy the complete current response. The usual selected-text copy shortcut also remains available within the panel.
 
 For a tested Windows setup, including API authentication, Obsidian CORS, validation, and the Hermes 0.19 streaming workaround, see [the Hermes Windows setup guide](docs/HERMES_WINDOWS_SETUP.md).
@@ -69,6 +75,12 @@ The plugin supports the file formats accepted by the picker, imports every suppo
 Image-oriented prompts can create validated, script-free SVG assets directly in the configured vault folder with a provenance note. **Sovereign Router: Optimize active image** resizes or converts an active PNG, JPEG, or WebP locally; it never uploads the source and never upscales it. Optional Hermes image generation is discovered from `/v1/toolsets` and remains approval-gated because provider charges and external data transfer may apply.
 
 See [Local-first image toolkit](docs/IMAGE_TOOLKIT.md) for the exact safety boundary and optional-provider strategy.
+
+## Programmatic video workflows
+
+Explicit requests to create or render a video can be sent to Hermes automatically from **Auto runtime**. Sovereign chooses Remotion for explainers, web/social video, MP4/ProRes delivery, and vertical formats; it chooses Manim for mathematical and scientific animation. The plugin does not install a renderer, start a terminal, or encode media in Obsidian. Hermes creates editable source, verifies a preview, and renders only through its existing approval and Agent Kernel policies.
+
+Set a vault-relative delivery folder in **Settings → Sovereign Router → Programmatic video**, then configure the corresponding absolute Hermes workspace and vault delivery path as Agent Kernel allowed roots. Install only the needed `iart-ai` video skill packs in the Hermes workspace; the `motion-skills` repository is a catalog rather than a renderer. See [Programmatic video workflows](docs/VIDEO_WORKFLOWS.md) for setup, renderer selection, and the approval boundary.
 
 ## Canvas context and creative references
 

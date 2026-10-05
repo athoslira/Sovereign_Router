@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from .store import RuntimeStore
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 
 class BridgeServer:
@@ -75,7 +75,31 @@ class BridgeServer:
                     store.expire_executions(cutoff)
                     self._json(200, {"status": "ok", "version": VERSION, "heartbeat_at": time.time(), "pending_approvals": store.pending_approvals()}); return
                 if path == "/v1/capabilities":
-                    self._json(200, {"version": 1, "policy": "balanced", "approvals": ["once", "session", "always", "deny"], "image": {"local_svg": True, "hermes_discovery": True}}); return
+                    self._json(200, {"version": 1, "policy": "balanced", "approvals": ["once", "session", "always", "deny"], "image": {"local_svg": True, "hermes_discovery": True}, "hub": {"task_protocol": 1, "local_only": True, "execution_adapter": True, "mcp_registry": True}}); return
+                if path == "/v1/hub/health":
+                    self._json(200, {"status": "ok", "version": VERSION, "task_protocol": 1, "execution_adapter": True, "mcp_registry": True}); return
+                if path == "/v1/hub/tasks":
+                    self._json(200, {"data": store.list_hub_tasks()}); return
+                if path == "/v1/hub/mcp/servers":
+                    self._json(200, {"data": store.list_hub_mcp_servers()}); return
+                match = re.fullmatch(r"/v1/hub/runs/([^/]+)/mcp-sessions", path)
+                if match:
+                    self._json(200, {"data": store.list_hub_mcp_sessions(match.group(1))}); return
+                match = re.fullmatch(r"/v1/hub/mcp-sessions/([^/]+)", path)
+                if match:
+                    value = store.get_hub_mcp_session(match.group(1))
+                    self._json(200 if value else 404, value or {"message": "Hub MCP session not found"}); return
+                match = re.fullmatch(r"/v1/hub/tasks/([^/]+)(/(runs|events))?", path)
+                if match:
+                    task_id, suffix = match.group(1), match.group(3)
+                    if suffix == "runs": self._json(200, {"data": store.list_hub_runs(task_id)}); return
+                    if suffix == "events": self._json(200, {"data": store.list_hub_events(task_id)}); return
+                    value = store.get_hub_task(task_id)
+                    self._json(200 if value else 404, value or {"message": "Hub task not found"}); return
+                match = re.fullmatch(r"/v1/hub/runs/([^/]+)", path)
+                if match:
+                    value = store.get_hub_run(match.group(1))
+                    self._json(200 if value else 404, value or {"message": "Hub run not found"}); return
                 if path == "/v1/grants":
                     self._json(200, {"data": store.list_grants()}); return
                 if path == "/v1/events":
@@ -101,6 +125,56 @@ class BridgeServer:
                     required = (body.get("version") == 1 and isinstance(execution_id, str) and 0 < len(execution_id) <= 200 and isinstance(session_id, str) and 0 < len(session_id) <= 200 and body.get("mode") == "governed" and bounded_strings(roots, 100) and bounded_strings(writes, 500) and bounded_strings(capabilities, 50))
                     if not required: self._json(400, {"message": "Invalid ExecutionEnvelopeV1"}); return
                     self._json(201, store.create_execution(body)); return
+                if path == "/v1/hub/tasks":
+                    title, kind, summary = body.get("title"), body.get("kind", "general"), body.get("summary", "")
+                    if body.get("version") != 1 or not isinstance(title, str) or not isinstance(kind, str) or not isinstance(summary, str): self._json(400, {"message": "Invalid HubTaskSpecV1"}); return
+                    try:
+                        self._json(201, store.create_hub_task(title, kind, summary))
+                    except ValueError:
+                        self._json(400, {"message": "Invalid HubTaskSpecV1"})
+                    return
+                match = re.fullmatch(r"/v1/hub/tasks/([^/]+)/transition", path)
+                if match:
+                    value = store.transition_hub_task(match.group(1), str(body.get("state", "")))
+                    self._json(200 if value else 409, value or {"message": "Invalid Hub task transition"}); return
+                match = re.fullmatch(r"/v1/hub/tasks/([^/]+)/runs", path)
+                if match:
+                    executor, model = body.get("executor"), body.get("model")
+                    if (executor is not None and not isinstance(executor, str)) or (model is not None and not isinstance(model, str)): self._json(400, {"message": "Invalid Hub run"}); return
+                    value = store.create_hub_run(match.group(1), executor, model)
+                    self._json(201 if value else 409, value or {"message": "Task must be planned before a run can be queued"}); return
+                match = re.fullmatch(r"/v1/hub/runs/([^/]+)/bind", path)
+                if match:
+                    execution_id, hermes_run_id = body.get("execution_id"), body.get("hermes_run_id")
+                    if not isinstance(execution_id, str) or not isinstance(hermes_run_id, str): self._json(400, {"message": "Invalid Hub run binding"}); return
+                    value = store.bind_hub_run(match.group(1), execution_id, hermes_run_id)
+                    self._json(200 if value else 409, value or {"message": "Hub run must be queued and bind to its governed execution"}); return
+                match = re.fullmatch(r"/v1/hub/runs/([^/]+)/transition", path)
+                if match:
+                    value = store.transition_hub_run(match.group(1), str(body.get("state", "")))
+                    self._json(200 if value else 409, value or {"message": "Invalid Hub run transition"}); return
+                match = re.fullmatch(r"/v1/hub/runs/([^/]+)/verify", path)
+                if match:
+                    verdict, evidence = body.get("verdict"), body.get("evidence_summary")
+                    if not isinstance(verdict, str) or not isinstance(evidence, str): self._json(400, {"message": "Invalid verification"}); return
+                    value = store.verify_hub_run(match.group(1), verdict, evidence)
+                    self._json(200 if value else 409, value or {"message": "Run must be awaiting verification with non-secret evidence"}); return
+                if path == "/v1/hub/mcp/servers":
+                    name, transport, server_ref, tools = body.get("name"), body.get("transport"), body.get("server_ref"), body.get("tools")
+                    if body.get("version") != 1 or not isinstance(name, str) or not isinstance(transport, str) or not isinstance(server_ref, str) or not isinstance(tools, list): self._json(400, {"message": "Invalid HubMcpServerV1"}); return
+                    value = store.register_hub_mcp_server(name, transport, server_ref, tools)
+                    self._json(201 if value else 400, value or {"message": "Invalid HubMcpServerV1"}); return
+                match = re.fullmatch(r"/v1/hub/runs/([^/]+)/mcp-sessions", path)
+                if match:
+                    server_id, tool_names = body.get("server_id"), body.get("tool_names")
+                    if not isinstance(server_id, str) or not isinstance(tool_names, list): self._json(400, {"message": "Invalid Hub MCP session"}); return
+                    value = store.create_hub_mcp_session(match.group(1), server_id, tool_names)
+                    self._json(201 if value else 409, value or {"message": "MCP server or requested tools are outside the run scope"}); return
+                match = re.fullmatch(r"/v1/hub/mcp-sessions/([^/]+)/decision", path)
+                if match:
+                    tool_name = body.get("tool_name")
+                    if not isinstance(tool_name, str): self._json(400, {"message": "Invalid MCP tool decision request"}); return
+                    self._json(200, store.decide_hub_mcp_tool(match.group(1), tool_name)); return
                 match = re.fullmatch(r"/v1/executions/([^/]+)/checkpoint", path)
                 if match:
                     status = str(body.get("status", "")); ok = bool(status) and store.checkpoint(match.group(1), status); self._json(200 if ok else 404, {"ok": ok}); return

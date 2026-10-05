@@ -41,10 +41,13 @@ export interface SovereignRouterSettings {
 	canvasMaxImageBytes: number;
 	workItemOutputRoot: string;
 	agentKernelEnabled: boolean;
+	hubEnabled: boolean;
 	agentKernelBridgeUrl: string;
 	agentKernelAllowedRoots: string[];
 	imageAuthoringEnabled: boolean;
 	imageOutputRoot: string;
+	videoWorkflowEnabled: boolean;
+	videoOutputRoot: string;
 	mcpServers: McpServerConfig[];
 }
 
@@ -82,10 +85,13 @@ export const DEFAULT_SETTINGS: SovereignRouterSettings = {
 	canvasMaxImageBytes: 6 * 1024 * 1024,
 	workItemOutputRoot: 'Sovereign/Tasks',
 	agentKernelEnabled: false,
+	hubEnabled: false,
 	agentKernelBridgeUrl: 'http://127.0.0.1:8643',
 	agentKernelAllowedRoots: [],
 	imageAuthoringEnabled: true,
 	imageOutputRoot: 'Sovereign/Images',
+	videoWorkflowEnabled: true,
+	videoOutputRoot: 'Sovereign/Videos',
 	mcpServers: [],
 };
 
@@ -178,12 +184,17 @@ export class SovereignRouterSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName('Agent Kernel').setHeading();
 		containerEl.createEl('p', { text: 'Optional desktop governance for Hermes tools. It uses the same secret as Hermes, keeps sanitized logs locally for 30 days, and fails closed before a governed run if the bridge is unavailable.' });
 		new Setting(containerEl).setName('Enable Agent Kernel').setDesc('Requires the sovereign-bridge Hermes plugin on the same machine. Direct OpenRouter chat remains available if the bridge is offline.').addToggle((toggle) => toggle.setValue(this.plugin.settings.agentKernelEnabled).onChange(async (value) => { this.plugin.settings.agentKernelEnabled = value; await this.plugin.saveSettings(); }));
+		new Setting(containerEl).setName('Enable Sovereign Hub').setDesc('Records governed Hermes runs as durable Hub tasks and exposes the local Hub console. Requires Agent Kernel and the same authenticated loopback bridge.').addToggle((toggle) => toggle.setValue(this.plugin.settings.hubEnabled).onChange(async (value) => { this.plugin.settings.hubEnabled = value; await this.plugin.saveSettings(); }));
 		this.addTextSetting('Agent Kernel bridge URL', 'Use the authenticated loopback service, normally http://127.0.0.1:8643.', this.plugin.settings.agentKernelBridgeUrl, async (value) => { this.plugin.settings.agentKernelBridgeUrl = value.replace(/\/$/, ''); });
 		this.addTextAreaSetting('Agent Kernel allowed roots', 'Hermes workspace roots, one per line. Absolute paths must match the bridge host. Leave empty until configured; governed file access will be denied.', this.plugin.settings.agentKernelAllowedRoots.join('\n'), async (value) => { this.plugin.settings.agentKernelAllowedRoots = splitLines(value); });
 		new Setting(containerEl).setName('Image toolkit').setHeading();
 		containerEl.createEl('p', { text: 'Local SVG creation is free and works without an image API. Optional Hermes image providers remain behind the Agent Kernel approval flow and may incur charges.' });
 		new Setting(containerEl).setName('Create image assets in the vault').setDesc('Lets image-oriented prompts return a validated, script-free SVG that Sovereign writes locally with provenance.').addToggle((toggle) => toggle.setValue(this.plugin.settings.imageAuthoringEnabled).onChange(async (value) => { this.plugin.settings.imageAuthoringEnabled = value; await this.plugin.saveSettings(); }));
 		this.addTextSetting('Image output root', 'Vault-relative folder for local SVG assets and provenance notes.', this.plugin.settings.imageOutputRoot, async (value) => { this.plugin.settings.imageOutputRoot = safeVaultRelativeRoot(value) || 'Sovereign/Images'; });
+		new Setting(containerEl).setName('Programmatic video').setHeading();
+		containerEl.createEl('p', { text: 'Video requests use Hermes for approved terminal and renderer work. Sovereign selects Remotion for web/social video and Manim for mathematical animation; it never renders video inside Obsidian.' });
+		new Setting(containerEl).setName('Route video creation to Hermes').setDesc('In Auto runtime, recognized requests for a rendered video use Hermes when it is configured. The normal approval policy still applies to source files, previews, and final renders.').addToggle((toggle) => toggle.setValue(this.plugin.settings.videoWorkflowEnabled).onChange(async (value) => { this.plugin.settings.videoWorkflowEnabled = value; await this.plugin.saveSettings(); }));
+		this.addTextSetting('Video output root', 'Vault-relative delivery folder. It must also be available through an approved Hermes workspace before it can receive renders.', this.plugin.settings.videoOutputRoot, async (value) => { this.plugin.settings.videoOutputRoot = safeVaultRelativeRoot(value) || 'Sovereign/Videos'; });
 		new Setting(containerEl).setName('Automatic vault context').setHeading();
 		containerEl.createEl('p', { text: 'The current vault is indexed locally after Obsidian loads. The Gatekeeper can request relevant context after routing; only those excerpts are sent to OpenRouter. Documents attached through Docling are added to the local context library automatically.' });
 		new Setting(containerEl).setName('Clear stored external documents').setDesc('Deletes only the converted document cache. Vault files remain in the local index and are always read from their current vault version.').addButton((button) => button.setWarning().setButtonText('Clear cache').onClick(async () => {

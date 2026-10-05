@@ -1,7 +1,7 @@
 name: sovereign-bridge
-version: "1.5.0"
+version: "1.6.0"
 kind: standalone
-description: "Local Agent Kernel policy, audit, and approval bridge for Sovereign Router."
+description: "Local Agent Kernel policy, audit, approval bridge, and Sovereign Hub task foundation."
 author: "Sovereign Router contributors"
 hooks:
   - on_session_start
