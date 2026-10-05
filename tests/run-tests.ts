@@ -129,7 +129,7 @@ run('plans bounded local raster optimization without upscaling', () => {
 });
 
 run('normalizes the Sovereign Hub task, run, event, and MCP contracts', () => {
-	assert.deepEqual(parseHubHealth({ status: 'ok', version: '1.6.0', task_protocol: 1, execution_adapter: true, mcp_registry: true }), { status: 'ok', version: '1.6.0', taskProtocol: 1, executionAdapter: true, mcpRegistry: true });
+	assert.deepEqual(parseHubHealth({ status: 'ok', version: '1.6.1', task_protocol: 1, execution_adapter: true, mcp_registry: true }), { status: 'ok', version: '1.6.1', taskProtocol: 1, executionAdapter: true, mcpRegistry: true });
 	assert.equal(parseHubTasks({ data: [{ id: 'task-1', title: 'Test task', kind: 'code', summary: '', state: 'running', created_at: 1, updated_at: 2 }] })[0]?.kind, 'code');
 	assert.equal(parseHubRuns({ data: [{ id: 'run-1', task_id: 'task-1', state: 'verifying', executor: 'hermes', model: null, hermes_run_id: 'h-1', execution_id: 'e-1', created_at: 1, updated_at: 2 }] })[0]?.state, 'verifying');
 	assert.equal(parseHubEvents({ data: [{ id: 1, task_id: 'task-1', run_id: null, type: 'run.bound', summary: 'safe', created_at: 1 }] })[0]?.type, 'run.bound');

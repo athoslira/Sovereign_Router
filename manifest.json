@@ -1,7 +1,7 @@
 {
 	"id": "sovereign-router",
 	"name": "Sovereign Router",
-	"version": "1.6.0",
+	"version": "1.6.1",
 	"minAppVersion": "1.11.4",
 	"description": "A local-first AI control plane with governed Hermes execution, vault context, image tools, and BYOK routing.",
 	"author": "Sovereign Router",

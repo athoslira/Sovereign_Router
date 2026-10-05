@@ -1,6 +1,6 @@
 # Agent Kernel
 
-The Agent Kernel is an optional local governance layer for Hermes runs. Sovereign Router 1.6.0 keeps ordinary OpenRouter chat and ungoverned Hermes compatibility unchanged; the fail-closed behavior applies only after **Enable Agent Kernel** is selected.
+The Agent Kernel is an optional local governance layer for Hermes runs. Sovereign Router 1.6.1 keeps ordinary OpenRouter chat and ungoverned Hermes compatibility unchanged; the fail-closed behavior applies only after **Enable Agent Kernel** is selected.
 
 ## What it controls
 

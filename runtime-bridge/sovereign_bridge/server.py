@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from .store import RuntimeStore
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 
 class BridgeServer:

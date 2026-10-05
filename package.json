@@ -1,6 +1,6 @@
 {
 	"name": "sovereign-router",
-	"version": "1.6.0",
+	"version": "1.6.1",
 	"description": "Local-first Obsidian AI control plane with governed Hermes execution, vault context, and image tools.",
 	"main": "main.js",
 	"type": "module",
